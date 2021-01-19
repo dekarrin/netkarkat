@@ -63,13 +63,13 @@ type LoggingCallbacks struct {
 	// Called for extremely low-level events, such as the exact bytes received/sent.
 	traceCb LogFormatter
 
-	// Called for low-level events, such as the sending and receiving of gremlin messages.
+	// Called for low-level events, such as the sending and receiving of messages.
 	debugCb LogFormatter
 
 	// Called for events that may indicate a future problem.
 	warnCb LogFormatter
 
-	// Called for events that cause a Connection to gremlin to no longer be valid.
+	// Called for events that cause a Connection to no longer be valid.
 	errorCb LogFormatter
 }
 
