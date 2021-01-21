@@ -55,7 +55,7 @@ func main() {
 
 	// parse cli options
 	commandFlag := kingpin.Flag("command", "command(s) to execute, after which the program exits. Comes before script file execution if both set. If any command fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('C').Strings()
-	connectionTimeoutFlag := kingpin.Flag("connection-timeout", "how long to wait (in seconds) for the initial connection before timing out").Default("10").Int()
+	timeoutFlag := kingpin.Flag("timeout", "how long to wait (in seconds) for the initial connection before timing out. Only valid for TCP.").Default("10").Short('t').Int()
 	hostFlag := kingpin.Flag("host", "the host to connect to; if any are set, overrides all in config (if any)").Short('H').Required().ResolvedIP()
 	skipVerifyFlag := kingpin.Flag("insecure-skip-verify", "do not verify server certificates when using SSL").Bool()
 	logFileFlag := kingpin.Flag("log", "create a detailed system log file at the given location").Short('l').OpenFile(os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0766)
@@ -64,8 +64,9 @@ func main() {
 	quietFlag := kingpin.Flag("quiet", "silence all output except for server results. Overrides verbose mode").Short('q').Bool()
 	scriptFileFlag := kingpin.Flag("script-file", "script(s) to execute, after which the program exits. Script files are executed in order they appear. If any command fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('f').ExistingFiles()
 	useSslFlag := kingpin.Flag("ssl", "enable SSL for the connection").Bool()
-	responseTimeoutFlag := kingpin.Flag("timeout", "amount of time to wait (in seconds) after sending a command before it is considered timed out").Default("30").Short('t').Int()
 	trustChainFileFlag := kingpin.Flag("trustchain", "file to use to verify server certificates when using SSL").ExistingFile()
+	protocolFlag := kingpin.Flag("protocol", "which protocol to use").Short('P').Enum("tcp", "udp")
+	noKeepalivesFlag := kingpin.Flag("no-keepalives", "disables keepalives in protocols that support them").Bool()
 	verboseFlag := kingpin.Flag("verbose", "make output more verbose; up to 3 can be specified for increasingly verbose output").Short('v').Counter()
 
 	kingpin.Version(currentVersion)
@@ -102,10 +103,11 @@ func main() {
 			out.Warn("--insecure-skip-verify option set but SSL is not enabled; ignoring")
 			*skipVerifyFlag = false
 		}
+	} else if *protocolFlag == "udp" {
+		handleFatalErrorWithStatusCode(fmt.Errorf("--ssl given for UDP but SSL/TLS over UDP (DTLS) is not supported"), ExitStatusArgumentsError)
+		return
 	}
-	if flagIsProvided("trustchain", "t") {
-		trustChainCertFile = *trustChainFileFlag
-	}
+	trustChainCertFile = *trustChainFileFlag
 
 	if *skipVerifyFlag {
 		out.Warn("--insecure-skip-verify given; server certificate will be not be verified")
@@ -115,8 +117,8 @@ func main() {
 		TLSEnabled:        useSsl,
 		TLSSkipVerify:     *skipVerifyFlag,
 		TLSTrustChain:     trustChainCertFile,
-		ConnectionTimeout: time.Duration(*connectionTimeoutFlag) * time.Second,
-		ResponseTimeout:   time.Duration(*responseTimeoutFlag) * time.Second,
+		ConnectionTimeout: time.Duration(*timeoutFlag) * time.Second,
+		DisableKeepalives: *noKeepalivesFlag,
 	}
 
 	if interactiveMode || out.Verbosity.Allows(verbosity.Debug) {
@@ -133,20 +135,33 @@ func main() {
 		}
 	})
 
-	conn, err := connection.OpenTCPConnection(func(data []byte) {
+	printRemoteMessage := func(data []byte) {
 		prettyHexStr := ""
 		for _, b := range data {
 			prettyHexStr += fmt.Sprintf("0x%s ", hex.EncodeToString([]byte{b}))
 		}
 		fmt.Printf("HOST>> %s\n", strings.TrimSpace(prettyHexStr))
-	}, cbs, host, port, connConf)
+	}
+
+	var conn connection.Connection
+	var err error
+
+	switch *protocolFlag {
+	case "tcp":
+		conn, err = connection.OpenTCPConnection(printRemoteMessage, cbs, host, port, connConf)
+	case "udp":
+		conn, err = connection.OpenUDPConnection(printRemoteMessage, cbs, host, port, connConf)
+	default:
+		handleFatalErrorWithStatusCode(fmt.Errorf("unknown protocol: %v", *protocolFlag), ExitStatusArgumentsError)
+		return
+	}
 	if err != nil {
 		handleFatalError(err)
 		sslSupportRequiredText := "non-SSL"
 		if useSsl {
 			sslSupportRequiredText = "SSL"
 		}
-		fmt.Fprintf(os.Stderr, "Ensure the remote server is up and supports %s TCP connections\n", sslSupportRequiredText)
+		fmt.Fprintf(os.Stderr, "Ensure the remote server is up and supports %s %v connections\n", sslSupportRequiredText, strings.ToUpper(*protocolFlag))
 		return
 	}
 
@@ -166,7 +181,7 @@ func main() {
 	}
 
 	if interactiveMode {
-		promptErr = console.StartPrompt(conn, out, currentVersion, "tcp", !*optionalSemicolonsFlag)
+		promptErr = console.StartPrompt(conn, out, currentVersion, *protocolFlag, !*optionalSemicolonsFlag)
 		if promptErr != nil {
 			if lastConnectionError == io.EOF {
 				// it will not have been printed yet bc of our error handler given to the connection, we need to do that now

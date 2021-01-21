@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// maximum number of bytes that can be read from the network layer at once
-const readerBufferSize = 1024
-
 // TCPConnection is an open connection over TCP.
 type TCPConnection struct {
 	socket         net.Conn
@@ -22,9 +19,6 @@ type TCPConnection struct {
 	closed         bool
 	log            LoggingCallbacks
 	recvHandler    ReceiveHandler
-
-	// Timeout is the amount of time that the connection will wait for a response to a request.
-	Timeout time.Duration
 }
 
 // OpenTCPConnection opens a new TCP connection, optionally with SSL enabled.
@@ -45,9 +39,6 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 		log:         logCBs,
 		hname:       hostSocketAddr,
 		recvHandler: recvHandler,
-	}
-	if opts.ResponseTimeout > 0 {
-		conn.Timeout = opts.ResponseTimeout
 	}
 
 	dialer := &net.Dialer{}
@@ -200,4 +191,9 @@ func (conn *TCPConnection) Send(data []byte) error {
 // GetRemoteName returns the host that was connected to
 func (conn *TCPConnection) GetRemoteName() string {
 	return conn.hname
+}
+
+// GetLocalName returns the name of the local side of the connection.
+func (conn *TCPConnection) GetLocalName() string {
+	return conn.socket.LocalAddr().String()
 }

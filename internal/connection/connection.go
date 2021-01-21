@@ -2,6 +2,9 @@ package connection
 
 import "time"
 
+// maximum number of bytes that can be read from the network layer at once
+const readerBufferSize = 1024
+
 // ReceiveHandler is used on calls to open to register a function to call when bytes are received.
 // The bytes are passed to the ReceiveHandler in a new goroutine, so there is no risk if there is
 // a problem with the handler.
@@ -23,10 +26,6 @@ type Options struct {
 
 	// ConnectionTimeout is how soon to give up on a connection. Zero value is no timeout.
 	ConnectionTimeout time.Duration
-
-	// MessageTimeout is how soon to give up on receiving a response to a message. This is
-	// only supported for protocols that have a clearly-defined "reply" mechanism such as TCP.
-	ResponseTimeout time.Duration
 
 	// DisableKeepalives specifies whether to turn off the typical keepalive messages for TCP.
 	DisableKeepalives bool
@@ -50,6 +49,9 @@ type Connection interface {
 
 	// Gets the name of the remote host that was connected to.
 	GetRemoteName() string
+
+	// Gets the name of the local side of the connection. This could be a port or something else specific to protocol.
+	GetLocalName() string
 }
 
 // LogFormatter is a string format function that is used in
