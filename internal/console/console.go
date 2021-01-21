@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -22,8 +23,15 @@ import (
 	"github.com/peterh/liner"
 )
 
-var bindExpressionRegex = regexp.MustCompile(`^([^=\s]+)(?:\s*=\s*|\s+)(.+)$`)
-var identifierRegex = regexp.MustCompile(`^[A-Za-z$_][A-Za-z$_0-9]*$`)
+const (
+	panicCodeCloseWhilePromptOpenBeforePrefixPrint = 1
+	panicCodeCloseWhilePromptOpenAfterPrefixPrint  = 2
+)
+
+var (
+	bindExpressionRegex = regexp.MustCompile(`^([^=\s]+)(?:\s*=\s*|\s+)(.+)$`)
+	identifierRegex     = regexp.MustCompile(`^[A-Za-z$_][A-Za-z$_0-9]*$`)
+)
 
 func buildHelpCommandName(name string) string {
 	c := commands[name]
@@ -56,6 +64,46 @@ func writeHelpForCommand(name string, sb *strings.Builder, descWidth int, leftCo
 		sb.WriteRune('\n')
 	}
 	sb.WriteRune('\n')
+}
+
+// runs prompt but sends up a panic if the connection closes so that we can
+// shutdown our liner and wrap in a proper error.
+//
+// Because liner.Prompt will block until escape character signaling end or
+// line-terminator, there doesn't appear to be any other way to break out
+// of this situation other than signals.
+//
+// non-nil errors will always be those returned by state.prompt.Prompt; the
+// connection closing while the prompt is active will result in a panic so
+// that the caller is forced to deal with the exceptional case of an invalid
+// liner. If this function panics, the liner will no longer be valid.
+func promptWithPanicOnConnectionClose(state *consoleState, prefix string) (string, error) {
+	type result struct {
+		s string
+		e error
+	}
+
+	inputCh := make(chan result, 1)
+	go func() {
+		str, err := state.prompt.Prompt(prefix)
+		inputCh <- result{s: str, e: err}
+	}()
+
+	// watch connection to make sure it's up, if it dies, immediately panic
+	var promptResult result
+	promptReturned := false
+	for !promptReturned {
+		select {
+		case promptResult = <-inputCh:
+			promptReturned = true
+		case <-time.After(10 * time.Millisecond):
+			// check in with the connection to make sure it hasn't gone to invalid state
+			if state.connection.IsClosed() {
+				panic(panicCodeCloseWhilePromptOpenAfterPrefixPrint)
+			}
+		}
+	}
+	return promptResult.s, promptResult.e
 }
 
 func showHelp() string {
@@ -260,22 +308,8 @@ var commands = commandList{
 type userInput struct {
 	input        string
 	inputForHist string
-	err          error
-}
-
-// reads a single statement from stdin and returns it as a channel.
-// Using a channel is useful because it allows the use of the select
-// statement for timing out or signal handling.
-func createStatementReader(state *consoleState, promptPrefix string) <-chan userInput {
-	outChan := make(chan userInput)
-
-	go func() {
-		input, histInput, err := promptUntilFullStatement(state, promptPrefix)
-		outChan <- userInput{input, histInput, err}
-		close(outChan)
-	}()
-
-	return outChan
+	promptErr    error
+	connErr      error
 }
 
 func init() {
@@ -390,7 +424,7 @@ func parseLineToBytes(line string) (data []byte, err error) {
 				continue
 			} else if runes[i+1] == 'x' {
 				// byte sequence
-				if i+3 <= len(runes) {
+				if i+3 >= len(runes) {
 					return nil, fmt.Errorf("unterminated byte sequence at char index %d", i)
 				}
 				hexStr := string(runes[i+2 : i+4])
@@ -424,6 +458,9 @@ func executeLine(state *consoleState, line string) (cmdOutput string, err error)
 		}
 	}()
 	normalLine, skipCommandMatching := normalizeLine(line)
+	if state.delimitWithSemicolon {
+		normalLine = strings.TrimSuffix(normalLine, ";")
+	}
 
 	if normalLine == "" {
 		state.out.Trace("not sending empty escaped input\n")
@@ -457,8 +494,6 @@ func executeLine(state *consoleState, line string) (cmdOutput string, err error)
 // ExecuteScript executes script input from the given reader.
 // It ignores comments and considers a semicolon to denote the end of a statement.
 //
-// The provided output writer
-//
 // Returns the number of lines processed successfully.
 //
 // If an error is encountered, the number of lines that were executed is returned along
@@ -474,8 +509,6 @@ func executeLine(state *consoleState, line string) (cmdOutput string, err error)
 // Everything after a "#" or a "//" is ignored.
 // If the provided line is empty after removing comments and trimming, no action is taken and the empty string
 // is returned.
-//
-// Metadata is never outputted unless in verbose mode.
 func ExecuteScript(f io.Reader, conn connection.Connection, out verbosity.OutputWriter, version string, delimitWithSemicolon bool) (lines int, err error) {
 	state := &consoleState{connection: conn, version: version, out: out, interactive: false, delimitWithSemicolon: delimitWithSemicolon}
 	scanner := bufio.NewScanner(f)
@@ -523,8 +556,22 @@ func ExecuteScript(f io.Reader, conn connection.Connection, out verbosity.Output
 }
 
 // StartPrompt makes a prompt and starts it
-func StartPrompt(conn connection.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool) {
-	prefix := "netkk> "
+func StartPrompt(conn connection.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool) (err error) {
+	// promptUntilFullStatement will panic if the connection closes during call. handle that here
+	defer func() {
+		if panicErr := recover(); panicErr != nil {
+			if panicErr == panicCodeCloseWhilePromptOpenAfterPrefixPrint {
+				// can only get here once the prompt has printed; print a new line so further messages are not after prompt
+				fmt.Printf("\n")
+				err = fmt.Errorf("connection was unexpectedly closed")
+			} else if panicErr == panicCodeCloseWhilePromptOpenBeforePrefixPrint {
+				err = fmt.Errorf("connection was unexpectedly closed")
+			} else {
+				panic(fmt.Errorf("got panic in StartPrompt: %v", panicErr))
+			}
+		}
+	}()
+	prefix := fmt.Sprintf("netkk@%s> ", conn.GetRemoteName())
 
 	state := consoleState{running: true, connection: conn, out: out, version: version, interactive: true, language: language, delimitWithSemicolon: delimitWithSemicolon}
 	prompt := liner.NewLiner()
@@ -543,9 +590,6 @@ func StartPrompt(conn connection.Connection, out verbosity.OutputWriter, version
 	state.out.Info("[netkarkat v%v]\n", state.version)
 	state.out.Info("HELP for help.\n")
 
-	// could use createStatementReader() and grab a channel if we need to watch signals...
-	// however peterh/liner puts the terminal into raw mode and doesn't put it back
-	// until the console is closed. So currently, there is no point.
 	for state.running {
 		// histCmd is same as cmd but with spaces instead of newlines for multiline input.
 		// this is because peterh/liner cannot currently track the cursor position
@@ -576,12 +620,17 @@ func StartPrompt(conn connection.Connection, out verbosity.OutputWriter, version
 		cmdOutput, err := executeLine(&state, cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
+			if state.connection.IsClosed() {
+				state.running = false
+			}
 		} else if cmdOutput != "" {
 			fmt.Printf("%s\n", cmdOutput)
 		}
 	}
+	return nil
 }
 
+// This function will panic if the connection is closed while prompting for input
 func promptUntilFullStatement(state *consoleState, prefix string) (inputWithNewlines string, inputWithSpaces string, err error) {
 	var histBuf *bytes.Buffer
 	defer func() {
@@ -600,7 +649,10 @@ func promptUntilFullStatement(state *consoleState, prefix string) (inputWithNewl
 
 	firstLevelPrefix := prefix
 	for moreInputRequired {
-		partialCmd, err := state.prompt.Prompt(prefix)
+		if state.connection.IsClosed() {
+			panic(panicCodeCloseWhilePromptOpenBeforePrefixPrint)
+		}
+		partialCmd, err := promptWithPanicOnConnectionClose(state, prefix)
 		if err == liner.ErrPromptAborted && !onFirstLineOfInput {
 			// abort the multi-line, but not the entire program
 			cmd = ""

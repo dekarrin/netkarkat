@@ -47,11 +47,18 @@ type Connection interface {
 	// connection a nil error indicates that a message was received (as is the case in TCP with an
 	// ACK in response to a client PSH.)
 	Send(data []byte) error
+
+	// Gets the name of the remote host that was connected to.
+	GetRemoteName() string
 }
 
 // LogFormatter is a string format function that is used in
 // LoggingCallbacks.
 type LogFormatter func(string, ...interface{})
+
+// LogErrorFormatter is a string format function that is used in
+// LoggingCallbacks.
+type LogErrorFormatter func(error, string, ...interface{})
 
 // LoggingCallbacks is used to store callbacks that are called when debug,
 // trace, error, or warn events occur. Any callback being set to its zero
@@ -70,7 +77,7 @@ type LoggingCallbacks struct {
 	warnCb LogFormatter
 
 	// Called for events that cause a Connection to no longer be valid.
-	errorCb LogFormatter
+	errorCb LogErrorFormatter
 }
 
 func (lc LoggingCallbacks) isValid() bool {
@@ -82,7 +89,9 @@ func (lc LoggingCallbacks) isValid() bool {
 //
 // Arguments that are set to nil are converted to no-op functions in the returned
 // struct.
-func NewLoggingCallbacks(traceCb LogFormatter, debugCb LogFormatter, warnCb LogFormatter, errorCb LogFormatter) LoggingCallbacks {
+// TODO: probs should call this something else because it is the only way to get the
+// socket errors (via LogErrorFormatter) since reads are performed asynchronously.
+func NewLoggingCallbacks(traceCb LogFormatter, debugCb LogFormatter, warnCb LogFormatter, errorCb LogErrorFormatter) LoggingCallbacks {
 	lc := LoggingCallbacks{traceCb: traceCb, debugCb: debugCb, warnCb: warnCb, errorCb: errorCb}
 
 	emptyFunc := func(_ string, _ ...interface{}) {}
@@ -96,7 +105,7 @@ func NewLoggingCallbacks(traceCb LogFormatter, debugCb LogFormatter, warnCb LogF
 		lc.warnCb = emptyFunc
 	}
 	if lc.errorCb == nil {
-		lc.errorCb = emptyFunc
+		lc.errorCb = func(_ error, _ string, _ ...interface{}) {}
 	}
 
 	return lc

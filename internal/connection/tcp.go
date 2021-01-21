@@ -10,9 +10,13 @@ import (
 	"time"
 )
 
+// maximum number of bytes that can be read from the network layer at once
+const readerBufferSize = 1024
+
 // TCPConnection is an open connection over TCP.
 type TCPConnection struct {
 	socket         net.Conn
+	hname          string
 	doneSignal     chan struct{}
 	closeInitiated bool
 	closed         bool
@@ -32,6 +36,7 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 
 	conn := &TCPConnection{
 		doneSignal: make(chan struct{}),
+		log:        logCBs,
 	}
 	if opts.ResponseTimeout > 0 {
 		conn.Timeout = opts.ResponseTimeout
@@ -46,6 +51,7 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 	}
 
 	hostSocketAddr := fmt.Sprintf("%s:%d", host, port)
+	conn.hname = hostSocketAddr
 
 	if opts.TLSEnabled {
 		tlsConf := &tls.Config{
@@ -87,9 +93,10 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 		defer close(conn.doneSignal)
 		defer func() { conn.closed = true }()
 
-		buf := make([]byte, 1024)
+		buf := make([]byte, readerBufferSize)
 
 		for {
+			// non-blocking read so we can check if we've been instructed to shut down
 			n, err := conn.socket.Read(buf)
 
 			if n > 0 {
@@ -101,25 +108,40 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 				// 2. recvHandler exploding won't kill all future attempts to
 				// pass to recvHandler.
 				go func() {
-					conn.log.traceCb("received bytes %s", hex.Dump(dataBytes))
+					conn.log.traceCb("received bytes %s", hex.EncodeToString(dataBytes))
 					conn.recvHandler(dataBytes)
 				}()
 			}
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					if !conn.closeInitiated {
-						conn.log.errorCb("socket closed unexpectedly: %v", err)
+						conn.log.errorCb(err, "socket closed unexpectedly: %v", err)
 					}
 					// we hit a deadline. immediately exit due to requested exit.
 				} else if conn.closeInitiated {
-					conn.log.errorCb("while closing, got non-close error: %v", err)
+					conn.log.errorCb(err, "while closing, got non-close error: %v", err)
 				} else {
-					conn.log.errorCb("socket closed")
+					conn.log.errorCb(err, "socket error: %v", err)
+					conn.socket.Close()
 				}
 				break
 			}
 		}
 	}()
+
+	// if we're in TCP connection there is no excuse for not checking
+	// that this is a valid connection; in the (moderately common case) of
+	// connecting to a docker port, if docker is up but the service in container
+	// isn't it will instantly drop an accepted TCP connection. Detect that
+	// by waiting a small amount of time for disconnect to be receieved.
+	//
+	// ofc, anything with a ping time of >100 will still be returned as not
+	// invalid, but that's okay, it'll be detected later and this at least
+	// improves the fail fast for some cases.
+	time.Sleep(100 * time.Millisecond)
+	if conn.IsClosed() {
+		return conn, fmt.Errorf("host accepted connection but immediately closed it")
+	}
 
 	return conn, nil
 }
@@ -137,7 +159,7 @@ func (conn *TCPConnection) Close() error {
 	}
 	var err error
 	conn.closeInitiated = true
-	conn.socket.SetDeadline(time.Now().Add(5 * time.Second))
+	conn.socket.SetDeadline(time.Now().Add(50 * time.Millisecond))
 	select {
 	case <-conn.doneSignal:
 	case <-time.After(5 * time.Second):
@@ -145,6 +167,9 @@ func (conn *TCPConnection) Close() error {
 	}
 
 	err = conn.socket.Close()
+	// reader thread exiting due to the socket.Close() should also set
+	// conn.closed = true but also set it here
+	// so that future callers instantly can no longer perform operations on this connection
 	conn.closed = true
 	if err != nil {
 		err = fmt.Errorf("error while closing connection: %v", err)
@@ -165,4 +190,9 @@ func (conn *TCPConnection) Send(data []byte) error {
 	}
 
 	return nil
+}
+
+// GetRemoteName returns the host that was connected to
+func (conn *TCPConnection) GetRemoteName() string {
+	return conn.hname
 }

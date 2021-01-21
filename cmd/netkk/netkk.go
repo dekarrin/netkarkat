@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -90,6 +91,7 @@ func main() {
 		return
 	}
 	useSsl = *useSslFlag
+	port = *portFlag
 
 	if !useSsl {
 		if flagIsProvided("trustchain", "") {
@@ -121,9 +123,18 @@ func main() {
 		out.Info("Connecting to %s:%d...\n", host, port)
 	}
 
-	cbs := connection.NewLoggingCallbacks(out.Trace, out.Debug, out.Warn, out.Error)
+	var lastConnectionError error
+	cbs := connection.NewLoggingCallbacks(out.Trace, out.Debug, out.Warn, func(err error, format string, a ...interface{}) {
+		lastConnectionError = err
+
+		// don't print eof
+		if err != io.EOF {
+			out.Error(format, a...)
+		}
+	})
+
 	conn, err := connection.OpenTCPConnection(func(data []byte) {
-		hexChars := []rune(hex.Dump(data))
+		hexChars := []rune(hex.EncodeToString(data))
 		prettyHexStr := ""
 		for i := 0; i < len(hexChars); i += 2 {
 			prettyHexStr += fmt.Sprintf("0x%v%v ", hexChars[i], hexChars[i+1])
@@ -140,8 +151,9 @@ func main() {
 		return
 	}
 
+	var promptErr error
 	defer func() {
-		if interactiveMode {
+		if interactiveMode && promptErr == nil {
 			out.Info("Closing connection...\n")
 		}
 		closeErr := conn.Close()
@@ -155,7 +167,15 @@ func main() {
 	}
 
 	if interactiveMode {
-		console.StartPrompt(conn, out, currentVersion, "tcp", !*optionalSemicolonsFlag)
+		promptErr = console.StartPrompt(conn, out, currentVersion, "tcp", !*optionalSemicolonsFlag)
+		if promptErr != nil {
+			if lastConnectionError == io.EOF {
+				// it will not have been printed yet bc of our error handler given to the connection, we need to do that now
+				promptErr = fmt.Errorf("%v: got unexpected EOF", promptErr)
+			}
+			handleFatalErrorWithStatusCode(promptErr, ExitStatusIOError)
+			return
+		}
 	} else {
 		// we have scripts or commands to execute
 		for idx, cmdArg := range *commandFlag {
