@@ -134,10 +134,9 @@ func main() {
 	})
 
 	conn, err := connection.OpenTCPConnection(func(data []byte) {
-		hexChars := []rune(hex.EncodeToString(data))
 		prettyHexStr := ""
-		for i := 0; i < len(hexChars); i += 2 {
-			prettyHexStr += fmt.Sprintf("0x%v%v ", hexChars[i], hexChars[i+1])
+		for _, b := range data {
+			prettyHexStr += fmt.Sprintf("0x%s ", hex.EncodeToString([]byte{b}))
 		}
 		fmt.Printf("HOST>> %s\n", strings.TrimSpace(prettyHexStr))
 	}, cbs, host, port, connConf)
@@ -171,10 +170,15 @@ func main() {
 		if promptErr != nil {
 			if lastConnectionError == io.EOF {
 				// it will not have been printed yet bc of our error handler given to the connection, we need to do that now
-				promptErr = fmt.Errorf("%v: got unexpected EOF", promptErr)
+				// IF we are in verbose mode. else the term just exits and the user can assume that is what happened.
+
+				// EOF is okay; don't print it unless in verbose, there are many cases the host could close connection
+				// and there is nothing for us to do about it.
+				out.Debug("%v: got EOF", promptErr)
+			} else {
+				handleFatalErrorWithStatusCode(promptErr, ExitStatusIOError)
+				return
 			}
-			handleFatalErrorWithStatusCode(promptErr, ExitStatusIOError)
-			return
 		}
 	} else {
 		// we have scripts or commands to execute

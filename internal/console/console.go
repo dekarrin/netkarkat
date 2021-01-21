@@ -563,9 +563,9 @@ func StartPrompt(conn connection.Connection, out verbosity.OutputWriter, version
 			if panicErr == panicCodeCloseWhilePromptOpenAfterPrefixPrint {
 				// can only get here once the prompt has printed; print a new line so further messages are not after prompt
 				fmt.Printf("\n")
-				err = fmt.Errorf("connection was unexpectedly closed")
+				err = fmt.Errorf("connection was closed")
 			} else if panicErr == panicCodeCloseWhilePromptOpenBeforePrefixPrint {
-				err = fmt.Errorf("connection was unexpectedly closed")
+				err = fmt.Errorf("connection was closed")
 			} else {
 				panic(fmt.Errorf("got panic in StartPrompt: %v", panicErr))
 			}

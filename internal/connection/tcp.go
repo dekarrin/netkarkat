@@ -34,9 +34,17 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 		return nil, fmt.Errorf("uninitialized LoggingCallbacks passed to connection.OpenTCPConnection() call; was it obtained using connection.NewLoggingCallbacks()?")
 	}
 
+	if recvHandler == nil {
+		return nil, fmt.Errorf("recvHandler must be provided for output delivery")
+	}
+
+	hostSocketAddr := fmt.Sprintf("%s:%d", host, port)
+
 	conn := &TCPConnection{
-		doneSignal: make(chan struct{}),
-		log:        logCBs,
+		doneSignal:  make(chan struct{}),
+		log:         logCBs,
+		hname:       hostSocketAddr,
+		recvHandler: recvHandler,
 	}
 	if opts.ResponseTimeout > 0 {
 		conn.Timeout = opts.ResponseTimeout
@@ -49,9 +57,6 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 	if opts.DisableKeepalives {
 		dialer.KeepAlive = -1 * time.Second
 	}
-
-	hostSocketAddr := fmt.Sprintf("%s:%d", host, port)
-	conn.hname = hostSocketAddr
 
 	if opts.TLSEnabled {
 		tlsConf := &tls.Config{
