@@ -8,4 +8,3 @@ IF [%MSYSTEM%]==[] (
   REM just always launch in winpty mode.
   winpty %scriptpath%netkk.exe %*
 )
-
