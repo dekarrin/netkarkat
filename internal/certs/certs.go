@@ -50,8 +50,8 @@ func generateSignedCertificate(ca *x509.Certificate, caKey *rsa.PrivateKey, cn s
 		SerialNumber: big.NewInt(413 * 612 * 1111 * 1125),
 		Subject: pkix.Name{
 			CommonName:         "localhost",
-			OrganizationalUnit: []string{"Generated CAs"},
-			Organization:       []string{"Netkarkat"},
+			OrganizationalUnit: []string{"Certificate generation system"},
+			Organization:       []string{"NetKarkat"},
 			Country:            []string{"US"},
 			Province:           []string{"MN"},
 			Locality:           []string{"Minneapolis"},
@@ -76,7 +76,7 @@ func generateSignedCertificate(ca *x509.Certificate, caKey *rsa.PrivateKey, cn s
 		}
 	}
 
-	privKey, err := rsa.GenerateKey(rand.Reader, 8192)
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -95,7 +95,7 @@ func generateCertificateAuthority() (certificateAuthority *x509.Certificate, sig
 		Subject: pkix.Name{
 			CommonName:         "Netkk-generated Certificate Authority",
 			OrganizationalUnit: []string{"Generated CAs"},
-			Organization:       []string{"Netkarkat"},
+			Organization:       []string{"NetKarkat"},
 			Country:            []string{"US"},
 			Province:           []string{"MN"},
 			Locality:           []string{"Minneapolis"},
@@ -108,7 +108,7 @@ func generateCertificateAuthority() (certificateAuthority *x509.Certificate, sig
 		BasicConstraintsValid: true,
 	}
 
-	privKey, err := rsa.GenerateKey(rand.Reader, 8192)
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -91,12 +92,14 @@ func OpenTCPServer(recvHandler ReceiveHandler, newClientHandler ClientConnectedH
 			}
 			tlsConf.Certificates = []tls.Certificate{serverCert}
 
-			err = ioutil.WriteFile("netkk-ca-"+time.Now().Format(time.RFC3339)+".pem", caPEM, os.FileMode(0667))
+			caFilename := strings.ReplaceAll(fmt.Sprintf("netkk-ca-%s.pem", time.Now().Format(time.RFC3339)), ":", "-")
+			err = ioutil.WriteFile(caFilename, caPEM, os.FileMode(0667))
 			if err != nil {
 				// if we cant write the ca it's not THAT bad; it's just that there will be no way to specify
 				// to clients that the server cert's ca is to be trusted.
 				logCBs.warnCb("could not write generated CA cert for self-signed cert: %v", err)
 			}
+			fmt.Printf("Wrote self-signed CA to %q", caFilename)
 
 			// probably should trust own CA
 			rootCAs, err := x509.SystemCertPool()

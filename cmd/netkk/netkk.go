@@ -144,7 +144,7 @@ func main() {
 		for _, b := range data {
 			prettyHexStr += fmt.Sprintf("0x%s ", hex.EncodeToString([]byte{b}))
 		}
-		fmt.Printf("HOST>> %s\n", strings.TrimSpace(prettyHexStr))
+		fmt.Printf("REMOTE>> %s\n", strings.TrimSpace(prettyHexStr))
 	}
 
 	if (interactiveMode || out.Verbosity.Allows(verbosity.Debug)) && remoteHost != "" {
