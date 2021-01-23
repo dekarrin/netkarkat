@@ -99,7 +99,7 @@ func OpenTCPServer(recvHandler ReceiveHandler, newClientHandler ClientConnectedH
 				// to clients that the server cert's ca is to be trusted.
 				logCBs.warnCb("could not write generated CA cert for self-signed cert: %v", err)
 			}
-			fmt.Printf("Wrote self-signed CA to %q", caFilename)
+			fmt.Printf("Wrote self-signed CA to %q\n", caFilename)
 
 			// probably should trust own CA
 			rootCAs, err := x509.SystemCertPool()

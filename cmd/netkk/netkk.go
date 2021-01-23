@@ -70,6 +70,7 @@ func main() {
 	serverCertCnFlag := kingpin.Flag("cert-common-name", "Gives the common name to use for a self-signed cert when using an SSL-enabled TCP server").String()
 	serverCertIPsFlag := kingpin.Flag("cert-ips", "Gives the IPs to list in a self-signed cert when using an SSL-enabled TCP server").IPList()
 	protocolFlag := kingpin.Flag("protocol", "which protocol to use").Short('p').Enum("tcp", "udp")
+	noPromptFlag := kingpin.Flag("no-prompt", "disable the prompt text giving info on the connected remote host").Bool()
 	noKeepalivesFlag := kingpin.Flag("no-keepalives", "disables keepalives in protocols that support them").Bool()
 	verboseFlag := kingpin.Flag("verbose", "make output more verbose; up to 3 can be specified for increasingly verbose output").Short('v').Counter()
 
@@ -144,7 +145,11 @@ func main() {
 		for _, b := range data {
 			prettyHexStr += fmt.Sprintf("0x%s ", hex.EncodeToString([]byte{b}))
 		}
-		fmt.Printf("REMOTE>> %s\n", strings.TrimSpace(prettyHexStr))
+		if *noPromptFlag {
+			out.Info("> %s\n", strings.TrimSpace(prettyHexStr))
+		} else {
+			out.Info("REMOTE>> %s\n", strings.TrimSpace(prettyHexStr))
+		}
 	}
 
 	if (interactiveMode || out.Verbosity.Allows(verbosity.Debug)) && remoteHost != "" {
@@ -200,7 +205,7 @@ func main() {
 	}
 
 	if interactiveMode {
-		promptErr = console.StartPrompt(conn, out, currentVersion, *protocolFlag, !*optionalSemicolonsFlag)
+		promptErr = console.StartPrompt(conn, out, currentVersion, *protocolFlag, !*optionalSemicolonsFlag, !*noPromptFlag)
 		if promptErr != nil {
 			if lastConnectionError == io.EOF {
 				// it will not have been printed yet bc of our error handler given to the connection, we need to do that now

@@ -556,7 +556,7 @@ func ExecuteScript(f io.Reader, conn driver.Connection, out verbosity.OutputWrit
 }
 
 // StartPrompt makes a prompt and starts it
-func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool) (err error) {
+func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool, showPromptText bool) (err error) {
 	// promptUntilFullStatement will panic if the connection closes during call. handle that here
 	defer func() {
 		if panicErr := recover(); panicErr != nil {
@@ -599,6 +599,9 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 	state.out.Info("HELP for help.\n")
 
 	prefix := fmt.Sprintf("netkk@%s> ", conn.GetRemoteName())
+	if !showPromptText {
+		prefix = ""
+	}
 
 	for state.running {
 		// histCmd is same as cmd but with spaces instead of newlines for multiline input.
