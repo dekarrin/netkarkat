@@ -120,8 +120,8 @@ func (conn *UDPConnection) Close() error {
 	conn.socket.SetDeadline(time.Now().Add(50 * time.Millisecond))
 	select {
 	case <-conn.doneSignal:
-	case <-time.After(5 * time.Second):
-		conn.log.warnCb("clean close timed out after 5 seconds; forcing unclean close")
+	case <-time.After(1 * time.Second):
+		conn.log.warnCb("clean close timed out after 1 second; forcing unclean close")
 	}
 
 	err = conn.socket.Close()
@@ -271,5 +271,4 @@ func (conn *UDPConnection) handleSockError(err error) {
 	} else if err != io.EOF {
 		conn.log.errorCb(err, "socket error: %v", err)
 	}
-	conn.socket.Close()
 }
