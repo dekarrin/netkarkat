@@ -578,7 +578,7 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 	for !state.connection.Ready() {
 		time.Sleep(101 * time.Millisecond)
 		if state.connection.IsClosed() {
-			return fmt.Errorf("Connection was closed")
+			return fmt.Errorf("driver was closed before it became ready")
 		}
 	}
 

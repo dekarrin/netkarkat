@@ -19,6 +19,7 @@ type TCPConnection struct {
 	closed         bool
 	log            LoggingCallbacks
 	recvHandler    ReceiveHandler
+	timedOut       bool
 }
 
 // OpenTCPClient opens a new TCP connection to a server, optionally with SSL enabled.
@@ -80,12 +81,18 @@ func OpenTCPClient(recvHandler ReceiveHandler, logCBs LoggingCallbacks, remoteHo
 		var err error
 		conn.socket, err = tls.DialWithDialer(dialer, "tcp", hostSocketAddr, tlsConf)
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				conn.timedOut = true
+			}
 			return conn, err
 		}
 	} else {
 		var err error
 		conn.socket, err = dialer.Dial("tcp", hostSocketAddr)
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				conn.timedOut = true
+			}
 			return conn, err
 		}
 	}
@@ -152,7 +159,7 @@ func (conn *TCPConnection) IsClosed() bool {
 	return conn.closed
 }
 
-// Close shuts down the connection contained in the given object. Waits maximum 5 seconds after sending close before assuming that the close was successful.
+// Close shuts down the connection contained in the given object.
 // After the connection has been closed, it cannot be used to send any more messages.
 func (conn *TCPConnection) Close() error {
 	if conn.closed {
@@ -163,8 +170,8 @@ func (conn *TCPConnection) Close() error {
 	conn.socket.SetDeadline(time.Now().Add(50 * time.Millisecond))
 	select {
 	case <-conn.doneSignal:
-	case <-time.After(5 * time.Second):
-		conn.log.warnCb("clean close timed out after 5 seconds; forcing unclean close")
+	case <-time.After(1 * time.Second):
+		conn.log.warnCb("clean close timed out after 1 second; forcing unclean close")
 	}
 
 	err = conn.socket.Close()
@@ -206,6 +213,11 @@ func (conn *TCPConnection) GetLocalName() string {
 // Ready returns whether the initial set up is complete. This is always true for a TCP Client's existence.
 func (conn *TCPConnection) Ready() bool {
 	return true
+}
+
+// GotTimeout returns whether the initial connection timed out.
+func (conn *TCPConnection) GotTimeout() bool {
+	return conn.timedOut
 }
 
 func (conn *TCPConnection) startReaderThread() {

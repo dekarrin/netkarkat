@@ -17,17 +17,19 @@ import (
 // On an establish, this will instantly convert its behavior to be that of the TCPConnection
 // and will immediately stop listening for new establishes.
 type TCPServerConnection struct {
-	listener    *net.TCPListener
-	log         LoggingCallbacks
-	doneSignal  chan struct{}
-	accepting   bool
-	firstClient net.Addr
+	listener       *net.TCPListener
+	log            LoggingCallbacks
+	doneSignal     chan struct{}
+	closeInitiated bool
+	accepting      bool
+	firstClient    net.Addr
 
 	// estab is used by multiple go routines. all access must be synched via estabMutex.
 	estab      *TCPConnection
 	estabMutex sync.Mutex
 
 	timeout    time.Duration
+	timedOut   bool
 	keepAlives bool
 	tlsConf    *tls.Config
 	onRecv     ReceiveHandler
@@ -74,6 +76,7 @@ func OpenTCPServer(recvHandler ReceiveHandler, newClientHandler ClientConnectedH
 		onConnect:  newClientHandler,
 		keepAlives: !opts.DisableKeepalives,
 		accepting:  true,
+		timeout:    opts.ConnectionTimeout,
 	}
 
 	if opts.TLSEnabled {
@@ -167,11 +170,12 @@ func (conn *TCPServerConnection) Close() error {
 
 	var err error
 	conn.accepting = false
+	conn.closeInitiated = true
 	conn.listener.SetDeadline(time.Now().Add(50 * time.Millisecond))
 	select {
 	case <-conn.doneSignal:
-	case <-time.After(5 * time.Second):
-		conn.log.warnCb("clean close timed out after 5 seconds; forcing unclean close")
+	case <-time.After(1 * time.Second):
+		conn.log.warnCb("clean close timed out after 1 second; forcing unclean close")
 	}
 
 	var serverErr, clientErr error
@@ -233,12 +237,51 @@ func (conn *TCPServerConnection) GetLocalName() string {
 	return conn.listener.Addr().String()
 }
 
+// GotTimeout returns whether the initial connection timed out.
+func (conn *TCPServerConnection) GotTimeout() bool {
+	return conn.timedOut
+}
+
 func (conn *TCPServerConnection) startListening() {
 	go func() {
 		defer close(conn.doneSignal)
 		defer func() { conn.accepting = false }()
 		for conn.accepting {
+
+			// we do not allow any connections after the first so this should only come up once
+			// in this for-loop, but have the checks in case we later decide to extend to accepting
+			// multiple or more after the first.
+
+			// if timeout requested and still waiting for first client:
+			if conn.firstClient == nil && conn.timeout != 0 {
+				conn.listener.SetDeadline(time.Now().Add(conn.timeout))
+			}
+
 			clientSock, err := conn.listener.AcceptTCP()
+
+			// if timeout is requested and we are accepting the first client:
+			if conn.firstClient == nil && conn.timeout != 0 {
+				if err != nil {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						if conn.closeInitiated {
+							// rare edge case to handle condition of listening for first connection but
+							// close requested prior to then (via Ctrl-C)
+							// don't print any messages, just continue.
+							continue
+						}
+						conn.timedOut = true
+						conn.log.errorCb(err, "timed out while waiting for connection")
+						break
+					}
+					// else it will be handled by next error check
+				}
+				conn.listener.SetDeadline(time.Time{})
+				// there is a race condition - Close() will call SetDeadline on the listener to attempt
+				// to make it stop listening. If it had JUST prior to the above call set it, it will then
+				// be removed. In this case, the Close() function is set up to force it closed after it detencts
+				// that this routine is not exiting.
+			}
+
 			if err != nil {
 				conn.log.errorCb(err, "could not accept client connection: %v", err)
 			}

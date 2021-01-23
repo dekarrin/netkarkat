@@ -65,7 +65,7 @@ type Connection interface {
 	// IsClosed checks if the connection has been closed.
 	IsClosed() bool
 
-	// Close shuts down the connection contained in the given object. Waits maximum 5 seconds after sending close before assuming that the close was successful.
+	// Close shuts down the connection contained in the given object.
 	// After the connection has been closed, it cannot be used to send any more messages.
 	Close() error
 
@@ -74,17 +74,21 @@ type Connection interface {
 	// ACK in response to a client PSH.)
 	Send(data []byte) error
 
-	// Gets the name of the remote host that was connected to.
+	// GetRemoteName gets the name of the remote host that was connected to.
 	GetRemoteName() string
 
-	// Gets the name of the local side of the connection. This could be a port or something else specific to protocol.
+	// GetLocalName gets the name of the local side of the connection. This could be a port or something else specific to protocol.
 	GetLocalName() string
 
-	// Checks whether a connection is ready to have bytes sent on it. This may be false at startup for protocols
+	// Ready checks whether a connection is ready to have bytes sent on it. This may be false at startup for protocols
 	// that listen for a connection between starting, such as TCP server.
 	//
 	// Note that this will return true even after the connection has been closed.
 	Ready() bool
+
+	// GotTimeout checks whether the initial connection/listen timed out, thus leading to the driver no longer being operable.
+	// The driver must still be closed even if this returns true.
+	GotTimeout() bool
 }
 
 // LogFormatter is a string format function that is used in

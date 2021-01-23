@@ -13,6 +13,8 @@ type UDPConnection struct {
 	socket          *net.UDPConn
 	startedHalfOpen bool
 	firstConnected  *net.UDPAddr
+	timeout         time.Duration
+	timedOut        bool
 	hname           string
 	doneSignal      chan struct{}
 	closeInitiated  bool
@@ -58,6 +60,7 @@ func OpenUDPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, remo
 		doneSignal:  make(chan struct{}),
 		log:         logCBs,
 		recvHandler: recvHandler,
+		timeout:     opts.ConnectionTimeout,
 	}
 
 	var err error
@@ -175,6 +178,12 @@ func (conn *UDPConnection) Ready() bool {
 	return true
 }
 
+// GotTimeout returns whether this driver connection has failed due to timeout
+// while waiting for the first connection.
+func (conn *UDPConnection) GotTimeout() bool {
+	return conn.timedOut
+}
+
 func (conn *UDPConnection) startReaderThread() {
 	go func() {
 		defer close(conn.doneSignal)
@@ -188,7 +197,31 @@ func (conn *UDPConnection) startReaderThread() {
 			if conn.startedHalfOpen {
 				var remoteAddr *net.UDPAddr
 
+				if conn.timeout != 0 && conn.firstConnected == nil {
+					conn.socket.SetDeadline(time.Now().Add(conn.timeout))
+				}
+
 				n, remoteAddr, err = conn.socket.ReadFromUDP(buf)
+
+				// if timeout is requested and we have gotten our first client:
+				if conn.firstConnected == nil && conn.timeout != 0 {
+					if err != nil {
+						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+							if conn.closeInitiated {
+								// rare edge case to handle condition of listening for first connection but
+								// close requested prior to then (via Ctrl-C)
+								// don't print any messages, just continue.
+								continue
+							}
+							conn.timedOut = true
+							conn.log.errorCb(err, "timed out while waiting for connection")
+							break
+						}
+						// else it will be handled by next error check
+					}
+					conn.socket.SetDeadline(time.Time{})
+				}
+
 				if conn.firstConnected == nil {
 					conn.log.debugCb("first client has connected from %v", remoteAddr)
 					conn.firstConnected = remoteAddr

@@ -54,25 +54,25 @@ func main() {
 	var localPort int
 
 	// parse cli options
-	commandFlag := kingpin.Flag("command", "command(s) to execute, after which the program exits. Comes before script file execution if both set. If any command fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('C').Strings()
-	timeoutFlag := kingpin.Flag("timeout", "how long to wait (in seconds) for the initial connection before timing out. Only valid for TCP.").Default("10").Short('t').Int()
-	remoteFlag := kingpin.Flag("remote", "the host to connect to. Must be in host_address:port form.").Short('r').String()
-	skipVerifyFlag := kingpin.Flag("insecure-skip-verify", "do not verify server certificates when using SSL").Bool()
-	logFileFlag := kingpin.Flag("log", "create a detailed system log file at the given location").OpenFile(os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0766)
-	listenFlag := kingpin.Flag("listen", "give the local port to 'bind' to. If none given, an ephemeral port is automatically chosen. Must be either in bind_ip:port form or just be the port, in which case 0.0.0.0 is used as the bind address.").Short('l').String()
-	optionalSemicolonsFlag := kingpin.Flag("optional-semicolons", "send each line to server instead of waiting for semicolon").Bool()
-	quietFlag := kingpin.Flag("quiet", "silence all output except for server results. Overrides verbose mode").Short('q').Bool()
-	scriptFileFlag := kingpin.Flag("script-file", "script(s) to execute, after which the program exits. Script files are executed in order they appear. If any command fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('f').ExistingFiles()
-	useSslFlag := kingpin.Flag("ssl", "enable SSL for the connection").Bool()
-	trustChainFileFlag := kingpin.Flag("trustchain", "file to use to verify server certificates when using SSL").ExistingFile()
-	serverCertFileFlag := kingpin.Flag("server-cert", "PEM cert file to use for encrypting SSL connections as a TCP server").ExistingFile()
-	serverKeyFileFlag := kingpin.Flag("server-key", "PEM private key file to use for encrypting SSL connections as a TCP server").ExistingFile()
-	serverCertCnFlag := kingpin.Flag("cert-common-name", "Gives the common name to use for a self-signed cert when using an SSL-enabled TCP server").String()
-	serverCertIPsFlag := kingpin.Flag("cert-ips", "Gives the IPs to list in a self-signed cert when using an SSL-enabled TCP server").IPList()
-	protocolFlag := kingpin.Flag("protocol", "which protocol to use").Short('p').Enum("tcp", "udp")
-	noPromptFlag := kingpin.Flag("no-prompt", "disable the prompt text giving info on the connected remote host").Bool()
-	noKeepalivesFlag := kingpin.Flag("no-keepalives", "disables keepalives in protocols that support them").Bool()
-	verboseFlag := kingpin.Flag("verbose", "make output more verbose; up to 3 can be specified for increasingly verbose output").Short('v').Counter()
+	protocolFlag := kingpin.Flag("protocol", "Which protocol to use.").Default("tcp").Short('p').Enum("tcp", "udp")
+	remoteFlag := kingpin.Flag("remote", "The remote host to connect to; can be an IP address or hostname. Must be in HOST_ADDRESS:PORT form.").Short('r').String()
+	listenFlag := kingpin.Flag("listen", "Give the local port to listen on/bind to. If none given, an ephemeral port is automatically chosen. Must be either in BIND_ADDRESS:PORT form or just be PORT form, in which case 127.0.0.1 is used as the bind address.").Short('l').String()
+	timeoutFlag := kingpin.Flag("timeout", "How long to wait (in seconds) for the initial connection before timing out. Always valid for TCP, but only valid for UDP when in listen-mode.").Default("10").Short('t').Int()
+	commandFlag := kingpin.Flag("command", "Byte(s) to send (or commands to execute), after which the program exits. Comes before script file execution if both set. If any send fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('C').Strings()
+	scriptFileFlag := kingpin.Flag("script-file", "Script(s) to execute, after which the program exits. Script files are executed in order they appear. If any command fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('f').ExistingFiles()
+	logFileFlag := kingpin.Flag("log", "Create a detailed system log file at the given location.").OpenFile(os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0766)
+	multilineModeFlag := kingpin.Flag("multiline", "Do not send input when enter is pressed; continuing reading input until a semicolon is encountered.").Short('m').Bool()
+	quietFlag := kingpin.Flag("quiet", "Silence all output except for server results. Overrides verbose mode.").Short('q').Bool()
+	useTLSFlag := kingpin.Flag("tls", "Enable SSL/TLS for the connection.").Bool()
+	skipVerifyFlag := kingpin.Flag("insecure-skip-verify", "Do not verify remote host server certificates when using SSL/TLS.").Bool()
+	trustChainFileFlag := kingpin.Flag("trustchain", "File to use to verify remote host server certificates when using SSL/TLS.").ExistingFile()
+	serverCertFileFlag := kingpin.Flag("server-cert", "PEM cert file to use for encrypting SSL/TLS connections as a TCP server.").ExistingFile()
+	serverKeyFileFlag := kingpin.Flag("server-key", "PEM private key file to use for encrypting SSL/TLS connections as a TCP server.").ExistingFile()
+	serverCertCnFlag := kingpin.Flag("cert-common-name", "The common name to use for a self-signed cert when using an SSL/TLS-enabled TCP server.").Default("localhost").String()
+	serverCertIPsFlag := kingpin.Flag("cert-ips", "The IPs to list in a self-signed cert when using an SSL/TLS-enabled TCP server.").IPList()
+	noPromptFlag := kingpin.Flag("no-prompt", "Disable the prompt text giving info on the connected remote host.").Bool()
+	noKeepalivesFlag := kingpin.Flag("no-keepalives", "Disable keepalives in protocols that support them (TCP).").Bool()
+	verboseFlag := kingpin.Flag("verbose", "Make output more verbose; up to 3 can be specified for increasingly verbose output.").Short('v').Counter()
 
 	kingpin.Version(currentVersion)
 	kingpin.CommandLine.HelpFlag.Short('h')
@@ -108,13 +108,13 @@ func main() {
 		var err error
 		localAddress, localPort, err = parseListenAddressFlag(*listenFlag)
 		if err != nil {
-			handleFatalErrorWithStatusCode(fmt.Errorf("local address: %v", err), ExitStatusArgumentsError)
+			handleFatalErrorWithStatusCode(fmt.Errorf("listen/local address: %v", err), ExitStatusArgumentsError)
 			return
 		}
 	}
 
 	connConf := driver.Options{
-		TLSEnabled:              *useSslFlag,
+		TLSEnabled:              *useTLSFlag,
 		TLSSkipVerify:           *skipVerifyFlag,
 		TLSTrustChain:           *trustChainFileFlag,
 		TLSServerCertFile:       *serverCertFileFlag,
@@ -177,11 +177,13 @@ func main() {
 	}
 	if err != nil {
 		handleFatalError(err)
-		sslSupportRequiredText := "non-SSL"
-		if connConf.TLSEnabled {
-			sslSupportRequiredText = "SSL"
+		if remoteHost != "" {
+			sslSupportRequiredText := "non-SSL"
+			if connConf.TLSEnabled {
+				sslSupportRequiredText = "SSL"
+			}
+			fmt.Fprintf(os.Stderr, "Ensure the remote server is up and supports %s %v connections\n", sslSupportRequiredText, strings.ToUpper(*protocolFlag))
 		}
-		fmt.Fprintf(os.Stderr, "Ensure the remote server is up and supports %s %v connections\n", sslSupportRequiredText, strings.ToUpper(*protocolFlag))
 		return
 	}
 
@@ -205,7 +207,7 @@ func main() {
 	}
 
 	if interactiveMode {
-		promptErr = console.StartPrompt(conn, out, currentVersion, *protocolFlag, !*optionalSemicolonsFlag, !*noPromptFlag)
+		promptErr = console.StartPrompt(conn, out, currentVersion, *protocolFlag, *multilineModeFlag, !*noPromptFlag)
 		if promptErr != nil {
 			if lastConnectionError == io.EOF {
 				// it will not have been printed yet bc of our error handler given to the connection, we need to do that now
@@ -214,7 +216,7 @@ func main() {
 				// EOF is okay; don't print it unless in verbose, there are many cases the host could close connection
 				// and there is nothing for us to do about it.
 				out.Debug("%v: got EOF", promptErr)
-			} else {
+			} else if !conn.GotTimeout() { // dont print additional message on connection timeout.
 				handleFatalErrorWithStatusCode(promptErr, ExitStatusIOError)
 				return
 			}
@@ -222,7 +224,7 @@ func main() {
 	} else {
 		// we have scripts or commands to execute
 		for idx, cmdArg := range *commandFlag {
-			_, err := console.ExecuteScript(strings.NewReader(cmdArg), conn, out, currentVersion, !*optionalSemicolonsFlag)
+			_, err := console.ExecuteScript(strings.NewReader(cmdArg), conn, out, currentVersion, *multilineModeFlag)
 			if err != nil {
 				handleFatalErrorWithStatusCode(fmt.Errorf("command #%d: %v", idx+1, err), ExitStatusScriptCommandError)
 				return
@@ -235,7 +237,7 @@ func main() {
 			}
 			defer f.Close()
 
-			lines, err := console.ExecuteScript(f, conn, out, currentVersion, !*optionalSemicolonsFlag)
+			lines, err := console.ExecuteScript(f, conn, out, currentVersion, !*multilineModeFlag)
 			if err != nil {
 				handleFatalErrorWithStatusCode(fmt.Errorf("%q:%d: %v", filename, lines+1, err), ExitStatusScriptCommandError)
 				return
@@ -355,6 +357,7 @@ func parseSocketAddressFlag(unparsed string) (string, int, error) {
 	if port < 1 || port > 65535 {
 		return "", 0, fmt.Errorf("%q is not a valid port; must be between 1 and 65535", parts[1])
 	}
+
 	return host, port, nil
 }
 
@@ -370,6 +373,11 @@ func parseListenAddressFlag(unparsed string) (string, int, error) {
 				return "", 0, fmt.Errorf("must be in HOST:PORT form or PORT form")
 			}
 			return "", 0, err
+		}
+	} else {
+		// range check
+		if port < 1 || port > 65535 {
+			return "", 0, fmt.Errorf("%q is not a valid port; must be between 1 and 65535", unparsed)
 		}
 	}
 	return addr, port, nil
