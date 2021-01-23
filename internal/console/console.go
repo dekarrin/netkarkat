@@ -15,7 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"dekarrin/netkarkat/internal/connection"
+	"dekarrin/netkarkat/internal/driver"
 	"dekarrin/netkarkat/internal/misc"
 	"dekarrin/netkarkat/internal/verbosity"
 
@@ -166,7 +166,7 @@ func showHelp() string {
 
 type consoleState struct {
 	language             string
-	connection           connection.Connection
+	connection           driver.Connection
 	running              bool         // only valid if in interactive mode
 	prompt               *liner.State // only valid if in interactive mode
 	usingHistFile        bool         // only valid if in interactive mode
@@ -509,7 +509,7 @@ func executeLine(state *consoleState, line string) (cmdOutput string, err error)
 // Everything after a "#" or a "//" is ignored.
 // If the provided line is empty after removing comments and trimming, no action is taken and the empty string
 // is returned.
-func ExecuteScript(f io.Reader, conn connection.Connection, out verbosity.OutputWriter, version string, delimitWithSemicolon bool) (lines int, err error) {
+func ExecuteScript(f io.Reader, conn driver.Connection, out verbosity.OutputWriter, version string, delimitWithSemicolon bool) (lines int, err error) {
 	state := &consoleState{connection: conn, version: version, out: out, interactive: false, delimitWithSemicolon: delimitWithSemicolon}
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
@@ -556,7 +556,7 @@ func ExecuteScript(f io.Reader, conn connection.Connection, out verbosity.Output
 }
 
 // StartPrompt makes a prompt and starts it
-func StartPrompt(conn connection.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool) (err error) {
+func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool) (err error) {
 	// promptUntilFullStatement will panic if the connection closes during call. handle that here
 	defer func() {
 		if panicErr := recover(); panicErr != nil {
@@ -571,9 +571,17 @@ func StartPrompt(conn connection.Connection, out verbosity.OutputWriter, version
 			}
 		}
 	}()
-	prefix := fmt.Sprintf("netkk@%s> ", conn.GetRemoteName())
 
 	state := consoleState{running: true, connection: conn, out: out, version: version, interactive: true, language: language, delimitWithSemicolon: delimitWithSemicolon}
+
+	// sleep until ready
+	for !state.connection.Ready() {
+		time.Sleep(101 * time.Millisecond)
+		if state.connection.IsClosed() {
+			return fmt.Errorf("Connection was closed")
+		}
+	}
+
 	prompt := liner.NewLiner()
 	defer prompt.Close()
 	state.prompt = prompt
@@ -589,6 +597,8 @@ func StartPrompt(conn connection.Connection, out verbosity.OutputWriter, version
 	printSplashTextArt(6, state.out)
 	state.out.Info("[netkarkat v%v]\n", state.version)
 	state.out.Info("HELP for help.\n")
+
+	prefix := fmt.Sprintf("netkk@%s> ", conn.GetRemoteName())
 
 	for state.running {
 		// histCmd is same as cmd but with spaces instead of newlines for multiline input.

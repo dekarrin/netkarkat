@@ -1,4 +1,4 @@
-package connection
+package driver
 
 import (
 	"crypto/tls"
@@ -21,18 +21,18 @@ type TCPConnection struct {
 	recvHandler    ReceiveHandler
 }
 
-// OpenTCPConnection opens a new TCP connection, optionally with SSL enabled.
-func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host net.IP, port int, opts Options) (*TCPConnection, error) {
+// OpenTCPClient opens a new TCP connection to a server, optionally with SSL enabled.
+func OpenTCPClient(recvHandler ReceiveHandler, logCBs LoggingCallbacks, remoteHost string, remotePort int, localPort int, opts Options) (*TCPConnection, error) {
 	// ensure user did not maually create loggingcallbacks
 	if !logCBs.isValid() {
-		return nil, fmt.Errorf("uninitialized LoggingCallbacks passed to connection.OpenTCPConnection() call; was it obtained using connection.NewLoggingCallbacks()?")
+		return nil, fmt.Errorf("uninitialized LoggingCallbacks passed to connection.OpenTCPClient() call; was it obtained using connection.NewLoggingCallbacks()?")
 	}
 
 	if recvHandler == nil {
 		return nil, fmt.Errorf("recvHandler must be provided for output delivery")
 	}
 
-	hostSocketAddr := fmt.Sprintf("%s:%d", host, port)
+	hostSocketAddr := fmt.Sprintf("%s:%d", remoteHost, remotePort)
 
 	conn := &TCPConnection{
 		doneSignal:  make(chan struct{}),
@@ -42,6 +42,12 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 	}
 
 	dialer := &net.Dialer{}
+
+	if localPort > 0 {
+		loc := &net.TCPAddr{Port: localPort}
+		dialer.LocalAddr = loc
+	}
+
 	if opts.ConnectionTimeout > 0 {
 		dialer.Timeout = opts.ConnectionTimeout
 	}
@@ -84,46 +90,45 @@ func OpenTCPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, host
 		}
 	}
 
-	// start reader thread
-	go func() {
-		defer close(conn.doneSignal)
-		defer func() { conn.closed = true }()
+	conn.startReaderThread()
 
-		buf := make([]byte, readerBufferSize)
+	// if we're in TCP connection there is no excuse for not checking
+	// that this is a valid connection; in the (moderately common case) of
+	// connecting to a docker port, if docker is up but the service in container
+	// isn't it will instantly drop an accepted TCP connection. Detect that
+	// by waiting a small amount of time for disconnect to be receieved.
+	//
+	// ofc, anything with a ping time of >100 will still be returned as not
+	// invalid, but that's okay, it'll be detected later and this at least
+	// improves the fail fast for some cases.
+	time.Sleep(100 * time.Millisecond)
+	if conn.IsClosed() {
+		return conn, fmt.Errorf("host accepted connection but immediately closed it")
+	}
 
-		for {
-			// non-blocking read so we can check if we've been instructed to shut down
-			n, err := conn.socket.Read(buf)
+	return conn, nil
+}
 
-			if n > 0 {
-				dataBytes := make([]byte, n)
-				copy(dataBytes, buf[:n])
+func newTCPConnectionFromAccept(recvHandler ReceiveHandler, logCBs LoggingCallbacks, keepalive bool, tlsConf *tls.Config, tcpConn *net.TCPConn) (*TCPConnection, error) {
+	// can skip a lot of checks because this is only called internally after a TCP server establishes a connection with a client.
 
-				// excecute reveive handler in go routine for 2 reasons
-				// 1. allows us to continue checking for more bytes quickly
-				// 2. recvHandler exploding won't kill all future attempts to
-				// pass to recvHandler.
-				go func() {
-					conn.log.traceCb("received bytes %s", hex.EncodeToString(dataBytes))
-					conn.recvHandler(dataBytes)
-				}()
-			}
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					if !conn.closeInitiated {
-						conn.log.errorCb(err, "socket closed unexpectedly: %v", err)
-					}
-					// we hit a deadline. immediately exit due to requested exit.
-				} else if conn.closeInitiated {
-					conn.log.errorCb(err, "while closing, got non-close error: %v", err)
-				} else {
-					conn.log.errorCb(err, "socket error: %v", err)
-					conn.socket.Close()
-				}
-				break
-			}
-		}
-	}()
+	if !keepalive {
+		tcpConn.SetKeepAlive(false)
+	}
+
+	conn := &TCPConnection{
+		socket:      tcpConn,
+		doneSignal:  make(chan struct{}),
+		log:         logCBs,
+		hname:       "",
+		recvHandler: recvHandler,
+	}
+
+	if tlsConf != nil {
+		conn.socket = tls.Server(conn.socket, tlsConf)
+	}
+
+	conn.startReaderThread()
 
 	// if we're in TCP connection there is no excuse for not checking
 	// that this is a valid connection; in the (moderately common case) of
@@ -196,4 +201,50 @@ func (conn *TCPConnection) GetRemoteName() string {
 // GetLocalName returns the name of the local side of the connection.
 func (conn *TCPConnection) GetLocalName() string {
 	return conn.socket.LocalAddr().String()
+}
+
+// Ready returns whether the initial set up is complete. This is always true for a TCP Client's existence.
+func (conn *TCPConnection) Ready() bool {
+	return true
+}
+
+func (conn *TCPConnection) startReaderThread() {
+	go func() {
+		defer close(conn.doneSignal)
+		defer func() { conn.closed = true }()
+
+		buf := make([]byte, readerBufferSize)
+
+		for {
+			n, err := conn.socket.Read(buf)
+
+			if n > 0 {
+				dataBytes := make([]byte, n)
+				copy(dataBytes, buf[:n])
+
+				// excecute reveive handler in go routine for 2 reasons
+				// 1. allows us to continue checking for more bytes quickly
+				// 2. recvHandler exploding won't kill all future attempts to
+				// pass to recvHandler.
+				go func() {
+					conn.log.traceCb("received bytes %s", hex.EncodeToString(dataBytes))
+					conn.recvHandler(dataBytes)
+				}()
+			}
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					if !conn.closeInitiated {
+						conn.log.errorCb(err, "socket closed unexpectedly: %v", err)
+					}
+					// we hit a deadline. immediately exit due to requested exit.
+				} else if conn.closeInitiated {
+					conn.log.errorCb(err, "while closing, got non-close error: %v", err)
+				} else {
+					conn.log.errorCb(err, "socket error: %v", err)
+					conn.socket.Close()
+				}
+				break
+			}
+		}
+	}()
 }
