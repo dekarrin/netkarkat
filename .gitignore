@@ -2,6 +2,7 @@
 netkk
 netkk-*
 
+*.exe
 *.pem
 *.log
 *.tar.gz
