@@ -91,7 +91,7 @@ func OpenUDPConnection(recvHandler ReceiveHandler, logCBs LoggingCallbacks, remo
 		}
 
 		var ok bool
-		if conn.socket, ok = netConn.(*net.UDPConn); ok {
+		if conn.socket, ok = netConn.(*net.UDPConn); !ok {
 			return nil, fmt.Errorf("did not get a UDP connection from dial")
 		}
 	}

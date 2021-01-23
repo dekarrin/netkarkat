@@ -99,15 +99,15 @@ func main() {
 		var err error
 		remoteHost, remotePort, err = parseSocketAddressFlag(*remoteFlag)
 		if err != nil {
-			handleFatalErrorWithStatusCode(err, ExitStatusArgumentsError)
+			handleFatalErrorWithStatusCode(fmt.Errorf("remote address: %v", err), ExitStatusArgumentsError)
 			return
 		}
 	}
 	if *listenFlag != "" {
 		var err error
-		localAddress, localPort, err = parseListenAddressFlag(*remoteFlag)
+		localAddress, localPort, err = parseListenAddressFlag(*listenFlag)
 		if err != nil {
-			handleFatalErrorWithStatusCode(err, ExitStatusArgumentsError)
+			handleFatalErrorWithStatusCode(fmt.Errorf("local address: %v", err), ExitStatusArgumentsError)
 			return
 		}
 	}
@@ -124,7 +124,10 @@ func main() {
 		DisableKeepalives:       *noKeepalivesFlag,
 	}
 
-	validateSSLOptions(&connConf, *protocolFlag, localAddress, localPort, remoteHost, remotePort, out)
+	if err := validateSSLOptions(&connConf, *protocolFlag, localAddress, localPort, remoteHost, remotePort, out); err != nil {
+		handleFatalErrorWithStatusCode(err, ExitStatusArgumentsError)
+		return
+	}
 
 	var lastConnectionError error
 	cbs := driver.NewLoggingCallbacks(out.Trace, out.Debug, out.Warn, func(err error, format string, a ...interface{}) {
