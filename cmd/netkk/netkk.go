@@ -61,7 +61,7 @@ func main() {
 	commandFlag := kingpin.Flag("command", "Byte(s) to send (or commands to execute), after which the program exits. Comes before script file execution if both set. If any send fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('C').Strings()
 	scriptFileFlag := kingpin.Flag("script-file", "Script(s) to execute, after which the program exits. Script files are executed in order they appear. If any command fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('f').ExistingFiles()
 	logFileFlag := kingpin.Flag("log", "Create a detailed system log file at the given location.").OpenFile(os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0766)
-	multilineModeFlag := kingpin.Flag("multiline", "Do not send input when enter is pressed; continuing reading input until a semicolon is encountered.").Short('m').Bool()
+	multilineModeFlag := kingpin.Flag("multiline", "Do not send input when enter is pressed; continuing reading input until a semicolon is encountered.").Short('M').Bool()
 	quietFlag := kingpin.Flag("quiet", "Silence all output except for server results. Overrides verbose mode.").Short('q').Bool()
 	useTLSFlag := kingpin.Flag("tls", "Enable SSL/TLS for the connection.").Bool()
 	skipVerifyFlag := kingpin.Flag("insecure-skip-verify", "Do not verify remote host server certificates when using SSL/TLS.").Bool()

@@ -125,6 +125,30 @@ func JustifyText(text string, width int) string {
 	return finishedWord
 }
 
+// CollapseWhitespace converts sequences of any character that is considered
+// whitespace by unicode (any rune r for which unicode.IsSpace(r) returns true)
+// are converved to a single instance of the space (' ') character.
+func CollapseWhitespace(s string) (collapsed string) {
+	var sb strings.Builder
+
+	var inSpaceSequence bool
+	for _, ch := range s {
+		if unicode.IsSpace(ch) {
+			inSpaceSequence = true
+		} else {
+			if inSpaceSequence {
+				sb.WriteRune(' ')
+				inSpaceSequence = false
+			}
+			sb.WriteRune(ch)
+		}
+	}
+	if inSpaceSequence {
+		sb.WriteRune(' ')
+	}
+	return sb.String()
+}
+
 func appendWordToLine(lines []string, curWord []rune, curLine []rune, width int) (newLines []string, newCurLine []rune) {
 	//originalWord := string(curWord)
 	for len(curWord) > 0 {
