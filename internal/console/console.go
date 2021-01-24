@@ -23,6 +23,15 @@ import (
 	"github.com/peterh/liner"
 )
 
+type errCloseDuringPrompt struct {
+	afterPrefix bool
+	invalid     bool
+}
+
+func (cdp errCloseDuringPrompt) Error() string {
+	return "driver was closed"
+}
+
 const (
 	panicCodeCloseWhilePromptOpenBeforePrefixPrint = 1
 	panicCodeCloseWhilePromptOpenAfterPrefixPrint  = 2
@@ -66,18 +75,7 @@ func writeHelpForCommand(name string, sb *strings.Builder, descWidth int, leftCo
 	sb.WriteRune('\n')
 }
 
-// runs prompt but sends up a panic if the connection closes so that we can
-// shutdown our liner and wrap in a proper error.
-//
-// Because liner.Prompt will block until escape character signaling end or
-// line-terminator, there doesn't appear to be any other way to break out
-// of this situation other than signals.
-//
-// non-nil errors will always be those returned by state.prompt.Prompt; the
-// connection closing while the prompt is active will result in a panic so
-// that the caller is forced to deal with the exceptional case of an invalid
-// liner. If this function panics, the liner will no longer be valid.
-func promptWithPanicOnConnectionClose(state *consoleState, prefix string) (string, error) {
+func promptWithConnectionMonitor(state *consoleState, prefix string) (string, error) {
 	type result struct {
 		s string
 		e error
@@ -106,8 +104,22 @@ func promptWithPanicOnConnectionClose(state *consoleState, prefix string) (strin
 		case <-time.After(10 * time.Millisecond):
 			// check in with the connection to make sure it hasn't gone to invalid state
 			if state.connection.IsClosed() {
-				state.prompt.Close()
-				panic(panicCodeCloseWhilePromptOpenAfterPrefixPrint)
+				if err := state.prompt.Close(); err != nil {
+					state.out.Trace("on post-prompt close: %v", err)
+				}
+				return "", errCloseDuringPrompt{
+					afterPrefix: true,
+					invalid:     true,
+				}
+			}
+			if !state.connection.Ready() {
+				if err := state.prompt.Close(); err != nil {
+					state.out.Trace("on post-prompt close: %v", err)
+				}
+				return "", errCloseDuringPrompt{
+					afterPrefix: true,
+					invalid:     false,
+				}
 			}
 		}
 	}
@@ -565,20 +577,6 @@ func ExecuteScript(f io.Reader, conn driver.Connection, out verbosity.OutputWrit
 
 // StartPrompt makes a prompt and starts it
 func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool, showPromptText bool) (err error) {
-	// promptUntilFullStatement will panic if the connection closes during call. handle that here
-	defer func() {
-		if panicErr := recover(); panicErr != nil {
-			if panicErr == panicCodeCloseWhilePromptOpenAfterPrefixPrint {
-				// can only get here once the prompt has printed; print a new line so further messages are not after prompt
-				fmt.Printf("\n")
-				err = fmt.Errorf("connection was closed")
-			} else if panicErr == panicCodeCloseWhilePromptOpenBeforePrefixPrint {
-				err = fmt.Errorf("connection was closed")
-			} else {
-				panic(fmt.Errorf("got panic in StartPrompt: %v", panicErr))
-			}
-		}
-	}()
 
 	state := consoleState{running: true, connection: conn, out: out, version: version, interactive: true, language: language, delimitWithSemicolon: delimitWithSemicolon}
 
@@ -590,17 +588,8 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 		}
 	}
 
-	prompt := liner.NewLiner()
-	defer prompt.Close()
-	state.prompt = prompt
-	prompt.SetCtrlCAborts(true)
-
-	prompt.SetMultiLineMode(true)
-
-	prompt.SetCompleter(func(line string) []string {
-		return autoComplete(language, &state, line)
-	})
-	state.usingHistFile = loadHistFile(prompt, state.out, state.language)
+	state.setupConsoleLiner(language)
+	defer state.prompt.Close()
 
 	printSplashTextArt(6, state.out)
 	state.out.Info("[netkarkat v%v]\n", state.version)
@@ -612,9 +601,8 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 		for !state.connection.Ready() {
 			time.Sleep(101 * time.Millisecond)
 			if state.connection.IsClosed() {
-				state.out.Debug("driver was closed before it became ready")
 				state.running = false
-				continue
+				return fmt.Errorf("driver was closed before it became ready")
 			}
 		}
 
@@ -626,7 +614,19 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 		// this is because peterh/liner cannot currently track the cursor position
 		// if multiline strings are put into its history.
 		cmd, histCmd, err := promptUntilFullStatement(&state, prefix)
-		if err == liner.ErrPromptAborted {
+		if isErrCloseDuringPrompt(err) {
+			errClose := err.(errCloseDuringPrompt)
+			if errClose.afterPrefix {
+				// can only get here once the prompt has printed; print a new line so further messages are not after prompt
+				fmt.Printf("\n")
+			}
+			if errClose.invalid {
+				return errClose
+			}
+			fmt.Printf("Client disconnected\n")
+			state.setupConsoleLiner(language)
+			continue
+		} else if err == liner.ErrPromptAborted {
 			state.out.Debug("console was aborted\n")
 			state.running = false
 			continue
@@ -643,9 +643,9 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 			continue
 		}
 
-		prompt.AppendHistory(histCmd)
+		state.prompt.AppendHistory(histCmd)
 		if state.usingHistFile {
-			state.usingHistFile = writeHistFile(prompt, state.out, state.language)
+			state.usingHistFile = writeHistFile(state.prompt, state.out, state.language)
 		}
 
 		cmdOutput, err := executeLine(&state, cmd)
@@ -661,7 +661,17 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 	return nil
 }
 
-// This function will panic if the connection is closed while prompting for input
+func (state *consoleState) setupConsoleLiner(language string) {
+	state.prompt = liner.NewLiner()
+	state.prompt.SetCtrlCAborts(true)
+	state.prompt.SetMultiLineMode(true)
+
+	state.prompt.SetCompleter(func(line string) []string {
+		return autoComplete(language, state, line)
+	})
+	state.usingHistFile = loadHistFile(state.prompt, state.out, state.language)
+}
+
 func promptUntilFullStatement(state *consoleState, prefix string) (inputWithNewlines string, inputWithSpaces string, err error) {
 	var histBuf *bytes.Buffer
 	defer func() {
@@ -681,10 +691,27 @@ func promptUntilFullStatement(state *consoleState, prefix string) (inputWithNewl
 	firstLevelPrefix := prefix
 	for moreInputRequired {
 		if state.connection.IsClosed() {
-			panic(panicCodeCloseWhilePromptOpenBeforePrefixPrint)
+			if err := state.prompt.Close(); err != nil {
+				state.out.Trace("on pre-prompt close: %v", err)
+			}
+			return "", "", errCloseDuringPrompt{
+				afterPrefix: false,
+				invalid:     true,
+			}
 		}
-		partialCmd, err := promptWithPanicOnConnectionClose(state, prefix)
-		if err == liner.ErrPromptAborted && !onFirstLineOfInput {
+		if !state.connection.Ready() {
+			if err := state.prompt.Close(); err != nil {
+				state.out.Trace("on pre-prompt close: %v", err)
+			}
+			return "", "", errCloseDuringPrompt{
+				afterPrefix: false,
+				invalid:     false,
+			}
+		}
+		partialCmd, err := promptWithConnectionMonitor(state, prefix)
+		if isErrCloseDuringPrompt(err) {
+			return "", "", err
+		} else if err == liner.ErrPromptAborted && !onFirstLineOfInput {
 			// abort the multi-line, but not the entire program
 			cmd = ""
 			cmdWithSpaces = ""
@@ -822,4 +849,11 @@ func showScriptLineOutput(out verbosity.OutputWriter, cmdOutput string) {
 	if cmdOutput != "" {
 		out.Info("%s", cmdOutput)
 	}
+}
+
+func isErrCloseDuringPrompt(err error) bool {
+	if _, ok := err.(errCloseDuringPrompt); ok {
+		return ok
+	}
+	return false
 }
