@@ -57,7 +57,7 @@ func main() {
 	protocolFlag := kingpin.Flag("protocol", "Which protocol to use.").Default("tcp").Short('p').Enum("tcp", "udp")
 	remoteFlag := kingpin.Flag("remote", "The remote host to connect to; can be an IP address or hostname. Must be in HOST_ADDRESS:PORT form.").Short('r').String()
 	listenFlag := kingpin.Flag("listen", "Give the local port to listen on/bind to. If none given, an ephemeral port is automatically chosen. Must be either in BIND_ADDRESS:PORT form or just be PORT form, in which case 127.0.0.1 is used as the bind address.").Short('l').String()
-	timeoutFlag := kingpin.Flag("timeout", "How long to wait (in seconds) for the initial connection before timing out. Always valid for TCP, but only valid for UDP when in listen-mode.").Default("10").Short('t').Int()
+	timeoutFlag := kingpin.Flag("timeout", "How long to wait (in seconds) for the initial connection before timing out. Always valid for TCP, but only valid for UDP when in listen-mode.").Default("30").Short('t').Int()
 	commandFlag := kingpin.Flag("command", "Byte(s) to send (or commands to execute), after which the program exits. Comes before script file execution if both set. If any send fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('C').Strings()
 	scriptFileFlag := kingpin.Flag("script-file", "Script(s) to execute, after which the program exits. Script files are executed in order they appear. If any command fails, this program will immediately terminate and return non-zero without executing the rest of the commands or scripts.").Short('f').ExistingFiles()
 	logFileFlag := kingpin.Flag("log", "Create a detailed system log file at the given location.").OpenFile(os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0766)
@@ -307,29 +307,6 @@ func validateSSLOptions(conf *driver.Options, protocol string, localAddress stri
 		}
 	}
 	return nil
-}
-
-func flagIsProvided(longName string, shortNames string) bool {
-	for _, arg := range os.Args {
-		if arg == "--" {
-			break
-		}
-		if strings.HasPrefix(arg, "--") {
-			arg = strings.Split(arg, "=")[0]
-			if arg == "--"+longName {
-				return true
-			}
-		} else if !strings.HasPrefix(arg, "--") && strings.HasPrefix(arg, "-") {
-			for _, shortName := range shortNames {
-				for _, argChar := range arg {
-					if shortName == argChar {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
 }
 
 // does proper handling of error and then exits

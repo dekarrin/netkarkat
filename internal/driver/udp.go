@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -19,8 +20,12 @@ type UDPConnection struct {
 	doneSignal      chan struct{}
 	closeInitiated  bool
 	closed          bool
-	log             LoggingCallbacks
-	recvHandler     ReceiveHandler
+
+	// not actually related to closed and closeInitiated; this is just to mark entering the Close() function
+	closeMutex sync.Mutex
+
+	log         LoggingCallbacks
+	recvHandler ReceiveHandler
 }
 
 // OpenUDPConnection opens a new UDP connection. SSL (DTLS) is not supported at this time.
@@ -112,11 +117,18 @@ func (conn *UDPConnection) IsClosed() bool {
 
 // Close shuts down the UDP connection and frees the associated resources
 func (conn *UDPConnection) Close() error {
+	conn.closeMutex.Lock()
 	if conn.closed {
+		conn.closeMutex.Unlock()
 		return nil // it's already been closed
 	}
 	var err error
 	conn.closeInitiated = true
+	// reader thread exiting due to the socket.Close() should also set
+	// conn.closed = true but also set it here
+	// so that future callers instantly can no longer perform operations on this connection
+	conn.closed = true
+	conn.closeMutex.Unlock()
 	conn.socket.SetDeadline(time.Now().Add(50 * time.Millisecond))
 	select {
 	case <-conn.doneSignal:
@@ -125,14 +137,15 @@ func (conn *UDPConnection) Close() error {
 	}
 
 	err = conn.socket.Close()
-	// reader thread exiting due to the socket.Close() should also set
-	// conn.closed = true but also set it here
-	// so that future callers instantly can no longer perform operations on this connection
-	conn.closed = true
 	if err != nil {
 		err = fmt.Errorf("error while closing connection: %v", err)
 	}
 	return err
+}
+
+// CloseActive is the same as a call to Close().
+func (conn *UDPConnection) CloseActive() error {
+	return conn.Close()
 }
 
 // Send sends binary data over the connection. A response is not waited for.

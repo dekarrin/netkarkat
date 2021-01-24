@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"dekarrin/netkarkat/internal/certs"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -18,18 +19,24 @@ import (
 // and will immediately stop listening for new establishes.
 type TCPServerConnection struct {
 	listener       *net.TCPListener
+	listening      bool
 	log            LoggingCallbacks
 	doneSignal     chan struct{}
 	closeInitiated bool
-	accepting      bool
-	firstClient    net.Addr
+	closed         bool
 
 	// estab is used by multiple go routines. all access must be synched via estabMutex.
-	estab      *TCPConnection
-	estabMutex sync.Mutex
+	estab           *TCPConnection
+	estabMutex      sync.Mutex
+	estabClientAddr net.Addr
 
-	timeout    time.Duration
-	timedOut   bool
+	timeout  time.Duration
+	timedOut bool
+
+	// we may need to cary the timeout to TLS handshaking; if so, this value
+	// will be required
+	listenStartTime time.Time
+
 	keepAlives bool
 	tlsConf    *tls.Config
 	onRecv     ReceiveHandler
@@ -75,7 +82,6 @@ func OpenTCPServer(recvHandler ReceiveHandler, newClientHandler ClientConnectedH
 		onRecv:     recvHandler,
 		onConnect:  newClientHandler,
 		keepAlives: !opts.DisableKeepalives,
-		accepting:  true,
 		timeout:    opts.ConnectionTimeout,
 	}
 
@@ -148,71 +154,72 @@ func OpenTCPServer(recvHandler ReceiveHandler, newClientHandler ClientConnectedH
 	return conn, nil
 }
 
-// IsClosed checks if the connection has been closed. This will be true after
-// the first client has connected and then that connection has been closed.
+// IsClosed checks if the connection has been closed.
 func (conn *TCPServerConnection) IsClosed() bool {
-	if !conn.accepting {
-		conn.estabMutex.Lock()
-		defer conn.estabMutex.Unlock()
-		if conn.estab != nil {
-			return conn.estab.IsClosed()
-		}
-		return true
+	return conn.closed
+}
+
+// CloseActive shuts down only the active client connection.
+func (conn *TCPServerConnection) CloseActive() error {
+	var err error
+	if err = conn.synchedInvalidateEstab(); err != nil {
+		err = fmt.Errorf("problem while closing active client connection: %v", err)
 	}
-	return false
+	return err
 }
 
 // Close shuts down the listening server and any active client connections.
-func (conn *TCPServerConnection) Close() error {
+func (conn *TCPServerConnection) Close() (closeErr error) {
+	conn.estabMutex.Lock()
 	if conn.IsClosed() {
+		conn.estabMutex.Unlock()
 		return nil // it's already been closed
 	}
 
-	var err error
-	conn.accepting = false
+	conn.closed = true
 	conn.closeInitiated = true
 	conn.listener.SetDeadline(time.Now().Add(50 * time.Millisecond))
 	select {
 	case <-conn.doneSignal:
-	case <-time.After(1 * time.Second):
-		conn.log.warnCb("clean close timed out after 1 second; forcing unclean close")
+	case <-time.After(99 * time.Millisecond):
+		conn.log.traceCb("clean close timed out after short timeout; forcing unclean close")
 	}
 
-	var serverErr, clientErr error
-	serverErr = conn.listener.Close()
-
-	conn.estabMutex.Lock()
-	if conn.estab != nil {
-		clientErr = conn.estab.Close()
-	}
+	serverErr := conn.listener.Close()
 	conn.estabMutex.Unlock()
 
+	clientErr := conn.synchedInvalidateEstab()
+
 	if serverErr != nil {
-		err = fmt.Errorf("problem closing server listener: %v", err)
+		closeErr = fmt.Errorf("problem closing server listener: %v", serverErr)
 	}
 	if clientErr != nil {
-		if err != nil {
-			err = fmt.Errorf("%v, additionally encountered problem while closing active client connection: %v", err, clientErr)
+		if closeErr != nil {
+			closeErr = fmt.Errorf("%v, additionally encountered problem while closing active client connection: %v", closeErr, clientErr)
 		} else {
-			err = fmt.Errorf("problem while closing active client connection: %v", clientErr)
+			closeErr = fmt.Errorf("problem while closing active client connection: %v", clientErr)
 		}
 	}
-
-	return err
+	return
 }
 
 // Send sends binary data over the connection. A response is not waited for, though depending on the
 // connection a non-nil error indicates that a message was received (as is the case in TCP with an
 // ACK in response to a client PSH.)
 func (conn *TCPServerConnection) Send(data []byte) error {
+	errNoClient := fmt.Errorf("this server connection doesn't currently have a client to communicate with")
 	if !conn.Ready() {
-		return fmt.Errorf("this server connection doesn't yet have a client to communicate with")
+		return errNoClient
 	}
 	if conn.IsClosed() {
 		return fmt.Errorf("this connection has been closed and can no longer be used to send")
 	}
+
 	conn.estabMutex.Lock()
 	defer conn.estabMutex.Unlock()
+	if conn.estab == nil {
+		return errNoClient
+	}
 	return conn.estab.Send(data)
 }
 
@@ -221,7 +228,7 @@ func (conn *TCPServerConnection) Send(data []byte) error {
 //
 // Note that a closed connection will return true as well.
 func (conn *TCPServerConnection) Ready() bool {
-	return conn.firstClient != nil && !conn.accepting
+	return conn.synchedClientIsConnected()
 }
 
 // GetRemoteName returns the host that was connected to
@@ -229,7 +236,11 @@ func (conn *TCPServerConnection) GetRemoteName() string {
 	if !conn.Ready() {
 		return ""
 	}
-	return conn.firstClient.String()
+	clientAddr := conn.synchedClientAddr()
+	if clientAddr == nil {
+		return ""
+	}
+	return clientAddr.String()
 }
 
 // GetLocalName returns the name of the local side of the connection.
@@ -245,72 +256,146 @@ func (conn *TCPServerConnection) GotTimeout() bool {
 func (conn *TCPServerConnection) startListening() {
 	go func() {
 		defer close(conn.doneSignal)
-		defer func() { conn.accepting = false }()
-		for conn.accepting {
+		defer func() {
+			if conn.estab != nil { // unsafe check first for speed, then safe check - TODO: probably a bad idea, check
+				conn.estabMutex.Lock()
+				defer conn.estabMutex.Unlock()
+				if conn.estab != nil {
+					if err := conn.estab.Close(); err != nil {
+						conn.log.debugCb("got error when closing established connection: %v", err)
+					}
+					conn.estab = nil
+					conn.estabClientAddr = nil
+				}
+			}
+		}()
+		for !conn.closeInitiated && !conn.closed {
+			conn.log.traceCb("starting to check for connections...")
 
+			// about to use "timeout deadline" several times, establish a single point now.
+			timeoutDeadline := time.Now().Add(conn.timeout)
 			// we do not allow any connections after the first so this should only come up once
 			// in this for-loop, but have the checks in case we later decide to extend to accepting
 			// multiple or more after the first.
 
-			// if timeout requested and still waiting for first client:
-			if conn.firstClient == nil && conn.timeout != 0 {
-				conn.listener.SetDeadline(time.Now().Add(conn.timeout))
+			// if timeout requested
+			if conn.timeout != 0 {
+				conn.log.traceCb("applying timeout to listen...")
+				if err := conn.listener.SetDeadline(timeoutDeadline); err != nil {
+					conn.log.debugCb("problem setting listener deadline: %v", err)
+				}
 			}
-
+			conn.log.traceCb("listening for client connection...")
 			clientSock, err := conn.listener.AcceptTCP()
-
-			// if timeout is requested and we are accepting the first client:
-			if conn.firstClient == nil && conn.timeout != 0 {
+			conn.log.traceCb("stopped listening for client connection...")
+			// if timeout is requested
+			if conn.timeout != 0 {
 				if err != nil {
 					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 						if conn.closeInitiated {
-							// rare edge case to handle condition of listening for first connection but
+							// handle condition of listening for first connection but
 							// close requested prior to then (via Ctrl-C)
 							// don't print any messages, just continue.
+							//
+							// not doing timedOut = true bc this is not the caller-requested timeout,
+							// but from an internal one set by Close().
 							continue
 						}
-						conn.timedOut = true
-						conn.log.errorCb(err, "timed out while waiting for connection")
-						break
+						if !conn.synchedClientIsConnected() {
+							conn.timedOut = true
+							conn.log.errorCb(err, "timed out while waiting for connection")
+							conn.Close()
+						}
+						continue
 					}
 					// else it will be handled by next error check
 				}
-				conn.listener.SetDeadline(time.Time{})
+				if err := conn.listener.SetDeadline(time.Time{}); err != nil {
+					conn.log.debugCb("problem unsetting listener deadline: %v", err)
+				}
 				// there is a race condition - Close() will call SetDeadline on the listener to attempt
 				// to make it stop listening. If it had JUST prior to the above call set it, it will then
-				// be removed. In this case, the Close() function is set up to force it closed after it detencts
+				// be removed. In this case, the Close() function is set up to force it closed after it detects
 				// that this routine is not exiting.
+				if conn.closeInitiated {
+					continue
+				}
 			}
 
 			if err != nil {
 				conn.log.errorCb(err, "could not accept client connection: %v", err)
+				go conn.Close()
+				continue
 			}
 
-			if !conn.accepting {
-				conn.log.debugCb("rejected connection from client at %v due to already being in active communication with another", clientSock.RemoteAddr())
+			if conn.synchedClientIsConnected() {
+				// nope, this is an interactive console and we cant have more than one
+				conn.log.traceCb("rejected connection from client at %v due to already being in active communication with another", clientSock.RemoteAddr().String())
+				continue
 			}
 
-			if conn.firstClient == nil {
-				conn.firstClient = clientSock.RemoteAddr()
-				conn.log.debugCb("first client has connected: %v", clientSock.RemoteAddr())
-			} else if conn.firstClient != clientSock.RemoteAddr() {
-				err := clientSock.Close()
-				if err != nil {
-					conn.log.warnCb("while closing client connection, got an error: %v", err)
+			tlsHandshakeDeadline := time.Time{}
+			if conn.tlsConf != nil && conn.timeout != 0 {
+				maxTLSHandshakeDeadline := time.Now().Add(10 * time.Second)
+				if timeoutDeadline.After(maxTLSHandshakeDeadline) {
+					tlsHandshakeDeadline = maxTLSHandshakeDeadline
+				} else {
+					tlsHandshakeDeadline = timeoutDeadline
 				}
-				conn.log.debugCb("rejected connection from non-first client at %v", clientSock.RemoteAddr())
+				tlsHandshakeDeadline = timeoutDeadline
+
+				conn.log.debugCb("waiting until %s for TLS client hello...", tlsHandshakeDeadline.Format(time.RFC3339))
 			}
 
-			conn.estabMutex.Lock()
-			conn.estab, err = newTCPConnectionFromAccept(conn.onRecv, conn.log, conn.keepAlives, conn.tlsConf, clientSock)
-			conn.estabMutex.Unlock()
-			if err != nil {
-				conn.log.warnCb("could not create TCP connection to client: %v", err)
-			}
-			conn.accepting = false
-
-			// do it in a go routine so it breaking doesn't blow up the accept loop
-			go conn.onConnect(clientSock.RemoteAddr().String())
+			conn.synchedHandleAccept(clientSock, tlsHandshakeDeadline)
 		}
 	}()
+}
+
+func (conn *TCPServerConnection) synchedClientAddr() net.Addr {
+	conn.estabMutex.Lock()
+	defer conn.estabMutex.Unlock()
+	return conn.estabClientAddr
+}
+
+func (conn *TCPServerConnection) synchedClientIsConnected() bool {
+	conn.estabMutex.Lock()
+	defer conn.estabMutex.Unlock()
+	if conn.estab != nil {
+		return true
+	}
+	return false
+}
+
+// this does not return an error so caller can continue accepting next connection and either taking or rejecting.
+func (conn *TCPServerConnection) synchedHandleAccept(clientSock *net.TCPConn, tlsHandshakeDeadline time.Time) {
+	conn.log.traceCb("accepting connection...")
+	var err error
+	conn.estabMutex.Lock()
+	defer conn.estabMutex.Unlock()
+	conn.estab, err = newTCPConnectionFromAccept(conn.onRecv, conn.log, conn.keepAlives, conn.tlsConf, tlsHandshakeDeadline, clientSock, conn.synchedInvalidateEstab)
+	if err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			conn.log.debugCb("abandoning connection; client did not send TLS hello within handshake timeout period")
+		} else {
+			conn.log.debugCb("abandoning connection; could not create TCP connection to client: %v", err)
+		}
+		return
+	}
+	conn.estabClientAddr = clientSock.RemoteAddr()
+	// do it in a go routine so it breaking doesn't blow up the accept loop
+	go conn.onConnect(clientSock.RemoteAddr().String())
+}
+
+func (conn *TCPServerConnection) synchedInvalidateEstab() error {
+	conn.estabMutex.Lock()
+	defer conn.estabMutex.Unlock()
+	var err error
+	if conn.estab != nil {
+		if err = conn.estab.Close(); err != nil {
+			conn.log.debugCb("problem closing established after invalidation: %v", err)
+		}
+		conn.estab = nil
+	}
+	return err
 }

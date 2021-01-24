@@ -89,6 +89,10 @@ type Connection interface {
 	// GotTimeout checks whether the initial connection/listen timed out, thus leading to the driver no longer being operable.
 	// The driver must still be closed even if this returns true.
 	GotTimeout() bool
+
+	// CloseActive shuts down the active connection. For server modes in stateful connections (i.e. TCP), this will terminate
+	// the active connection with a client and put it back in the listening state. For others, it is equivalent to Close().
+	CloseActive() error
 }
 
 // LogFormatter is a string format function that is used in

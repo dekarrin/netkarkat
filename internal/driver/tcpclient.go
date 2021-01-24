@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -17,9 +18,13 @@ type TCPConnection struct {
 	doneSignal     chan struct{}
 	closeInitiated bool
 	closed         bool
-	log            LoggingCallbacks
-	recvHandler    ReceiveHandler
-	timedOut       bool
+
+	// not actually related to closed and closeInitiated; this is just to mark entering the Close() function
+	closeMutex   sync.Mutex
+	log          LoggingCallbacks
+	recvHandler  ReceiveHandler
+	timedOut     bool
+	onInvalidate func() error
 }
 
 // OpenTCPClient opens a new TCP connection to a server, optionally with SSL enabled.
@@ -36,10 +41,11 @@ func OpenTCPClient(recvHandler ReceiveHandler, logCBs LoggingCallbacks, remoteHo
 	hostSocketAddr := fmt.Sprintf("%s:%d", remoteHost, remotePort)
 
 	conn := &TCPConnection{
-		doneSignal:  make(chan struct{}),
-		log:         logCBs,
-		hname:       hostSocketAddr,
-		recvHandler: recvHandler,
+		doneSignal:   make(chan struct{}),
+		log:          logCBs,
+		hname:        hostSocketAddr,
+		recvHandler:  recvHandler,
+		onInvalidate: func() error { return nil },
 	}
 
 	dialer := &net.Dialer{}
@@ -116,23 +122,43 @@ func OpenTCPClient(recvHandler ReceiveHandler, logCBs LoggingCallbacks, remoteHo
 	return conn, nil
 }
 
-func newTCPConnectionFromAccept(recvHandler ReceiveHandler, logCBs LoggingCallbacks, keepalive bool, tlsConf *tls.Config, tcpConn *net.TCPConn) (*TCPConnection, error) {
+func newTCPConnectionFromAccept(recvHandler ReceiveHandler, logCBs LoggingCallbacks, keepalive bool, tlsConf *tls.Config, tlsHandshakeDeadline time.Time, tcpConn *net.TCPConn, onInvalidate func() error) (*TCPConnection, error) {
 	// can skip a lot of checks because this is only called internally after a TCP server establishes a connection with a client.
 
 	if !keepalive {
 		tcpConn.SetKeepAlive(false)
 	}
 
-	conn := &TCPConnection{
-		socket:      tcpConn,
-		doneSignal:  make(chan struct{}),
-		log:         logCBs,
-		hname:       "",
-		recvHandler: recvHandler,
+	var sock net.Conn
+	sock = tcpConn
+	if tlsConf != nil {
+		tlsConn := tls.Server(sock, tlsConf)
+		if err := tlsConn.SetDeadline(tlsHandshakeDeadline); err != nil {
+			// don't error check; nothing to do if we cant close it
+			tlsConn.Close()
+			return nil, err
+		}
+		if err := tlsConn.Handshake(); err != nil {
+			// don't error check; nothing to do if we cant close it
+			tlsConn.Close()
+			return nil, err
+		}
+		// turn off the deadline
+		if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+			// don't error check; nothing to do if we cant close it
+			tlsConn.Close()
+			return nil, err
+		}
+		sock = tlsConn
 	}
 
-	if tlsConf != nil {
-		conn.socket = tls.Server(conn.socket, tlsConf)
+	conn := &TCPConnection{
+		socket:       sock,
+		doneSignal:   make(chan struct{}),
+		log:          logCBs,
+		hname:        "",
+		recvHandler:  recvHandler,
+		onInvalidate: onInvalidate,
 	}
 
 	conn.startReaderThread()
@@ -162,27 +188,36 @@ func (conn *TCPConnection) IsClosed() bool {
 // Close shuts down the connection contained in the given object.
 // After the connection has been closed, it cannot be used to send any more messages.
 func (conn *TCPConnection) Close() error {
+	conn.closeMutex.Lock()
 	if conn.closed {
+		conn.closeMutex.Unlock()
 		return nil // it's already been closed
 	}
 	var err error
-	conn.closeInitiated = true
-	conn.socket.SetDeadline(time.Now().Add(50 * time.Millisecond))
-	select {
-	case <-conn.doneSignal:
-	case <-time.After(1 * time.Second):
-		conn.log.warnCb("clean close timed out after 1 second; forcing unclean close")
-	}
-
-	err = conn.socket.Close()
 	// reader thread exiting due to the socket.Close() should also set
 	// conn.closed = true but also set it here
 	// so that future callers instantly can no longer perform operations on this connection
 	conn.closed = true
+	conn.closeInitiated = true
+	conn.closeMutex.Unlock()
+
+	conn.socket.SetDeadline(time.Now().Add(50 * time.Millisecond))
+	select {
+	case <-conn.doneSignal:
+	case <-time.After(99 * time.Millisecond):
+		conn.log.traceCb("clean close timed out after short timeout; forcing unclean close")
+	}
+
+	err = conn.socket.Close()
 	if err != nil {
 		err = fmt.Errorf("error while closing connection: %v", err)
 	}
 	return err
+}
+
+// CloseActive shuts down the connection. It is the same as Close().
+func (conn *TCPConnection) CloseActive() error {
+	return conn.Close()
 }
 
 // Send sends binary data over the connection. A response is not waited for, though depending on the
@@ -194,6 +229,8 @@ func (conn *TCPConnection) Send(data []byte) error {
 	}
 	n, err := conn.socket.Write(data)
 	if err != nil {
+		go conn.Close()
+		conn.onInvalidate()
 		return fmt.Errorf("After writing %d byte(s), got error in write: %v", n, err)
 	}
 
@@ -223,7 +260,7 @@ func (conn *TCPConnection) GotTimeout() bool {
 func (conn *TCPConnection) startReaderThread() {
 	go func() {
 		defer close(conn.doneSignal)
-		defer func() { conn.closed = true }()
+		defer func() { go conn.onInvalidate() }()
 
 		buf := make([]byte, readerBufferSize)
 
@@ -248,12 +285,13 @@ func (conn *TCPConnection) startReaderThread() {
 					if !conn.closeInitiated {
 						conn.log.errorCb(err, "socket closed unexpectedly: %v", err)
 					}
+					conn.Close()
 					// we hit a deadline. immediately exit due to requested exit.
 				} else if conn.closeInitiated {
 					conn.log.errorCb(err, "while closing, got non-close error: %v", err)
 				} else {
 					conn.log.errorCb(err, "socket error: %v", err)
-					conn.socket.Close()
+					conn.Close()
 				}
 				break
 			}

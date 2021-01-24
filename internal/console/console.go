@@ -84,7 +84,14 @@ func promptWithPanicOnConnectionClose(state *consoleState, prefix string) (strin
 	}
 
 	inputCh := make(chan result, 1)
+
+	// todo: think this might leak. this is technically okay for now
+	// as the main program immediately exits but this could be a problem
+	// in any other context
 	go func() {
+		defer func() {
+			state.out.Trace("keyboard input reader exited")
+		}()
 		str, err := state.prompt.Prompt(prefix)
 		inputCh <- result{s: str, e: err}
 	}()
@@ -99,6 +106,7 @@ func promptWithPanicOnConnectionClose(state *consoleState, prefix string) (strin
 		case <-time.After(10 * time.Millisecond):
 			// check in with the connection to make sure it hasn't gone to invalid state
 			if state.connection.IsClosed() {
+				state.prompt.Close()
 				panic(panicCodeCloseWhilePromptOpenAfterPrefixPrint)
 			}
 		}
@@ -598,12 +606,22 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 	state.out.Info("[netkarkat v%v]\n", state.version)
 	state.out.Info("HELP for help.\n")
 
-	prefix := fmt.Sprintf("netkk@%s> ", conn.GetRemoteName())
-	if !showPromptText {
-		prefix = ""
-	}
-
+	var prefix string
 	for state.running {
+		// if the connection has gone non-ready, stop running
+		for !state.connection.Ready() {
+			time.Sleep(101 * time.Millisecond)
+			if state.connection.IsClosed() {
+				state.out.Debug("driver was closed before it became ready")
+				state.running = false
+				continue
+			}
+		}
+
+		if showPromptText {
+			prefix = fmt.Sprintf("netkk@%s> ", conn.GetRemoteName())
+		}
+
 		// histCmd is same as cmd but with spaces instead of newlines for multiline input.
 		// this is because peterh/liner cannot currently track the cursor position
 		// if multiline strings are put into its history.
@@ -613,8 +631,8 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 			state.running = false
 			continue
 		} else if err == io.EOF {
-			state.out.Debug("console hit EOF\n")
-			state.running = false
+			state.out.Debug("abandoning active connection due to ^D input\n")
+			state.connection.CloseActive()
 			continue
 		} else if err != nil {
 			fmt.Fprintf(os.Stderr, "fatal error: %v\n", err)
