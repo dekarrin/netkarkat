@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"dekarrin/netkarkat/internal/driver"
+	"dekarrin/netkarkat/internal/macros"
 	"dekarrin/netkarkat/internal/misc"
 	"dekarrin/netkarkat/internal/verbosity"
 
@@ -188,8 +189,7 @@ type consoleState struct {
 	out                  verbosity.OutputWriter
 	interactive          bool
 	delimitWithSemicolon bool
-	macrosets            map[string]macroset
-	curMacroset          string
+	macros               macros.MacroCollection
 }
 
 type command struct {
@@ -320,17 +320,17 @@ var commands = commandList{
 		aliasFor: "EXIT",
 	},
 	"SEND": command{
-		helpInvoke: "bytes...",
+		helpInvoke: "<bytes...>",
 		helpDesc:   "Sends bytes. This command is assumed when no other command is given.",
 		lineExec:   executeCommandSend,
 	},
 	"DEFINE": command{
-		helpInvoke: "macro bytes...",
+		helpInvoke: "<macro> <bytes...>",
 		helpDesc:   "Create a macro that can be typed instead of a sequence of bytes; after DEFINE is used, the supplied name will be interpreted to be the supplied bytes in any context that takes bytes. Macros can also be used in other macro definitions, and will update the macro they are in when their own contents change. Macro names are case-insensitive.",
 		lineExec:   executeCommandDefine,
 	},
 	"UNDEFINE": command{
-		helpInvoke: "[-r] macro",
+		helpInvoke: "[-r] <macro>",
 		helpDesc:   "Remove the definition of an existing macro created in a previous call to DEFINE. By default, any other macros that included the removed macro in their definitions will simply keep them as the bytes that represent the characters in the deleted macro's name; to have them replace it with its previous contents and continue to function as before, give the -r flag. Macro names are case-insensitive.",
 		argsExec:   executeCommandUndefine,
 	},
@@ -340,7 +340,7 @@ var commands = commandList{
 		argsExec:   executeCommandList,
 	},
 	"SHOW": command{
-		helpInvoke: "macro",
+		helpInvoke: "<macro>",
 		helpDesc:   "Show the contents of a macro in the current macroset. Macro names are case-insensitive.",
 		argsExec:   executeCommandShow,
 	},
@@ -350,8 +350,8 @@ var commands = commandList{
 		argsExec:   executeCommandMacroset,
 	},
 	"RENAME": {
-		helpInvoke: "old_name new_name [-d] [-s]",
-		helpDesc:   "Renames the item referred to by old_name to new_name. The old_name must be either a macro created with DEFINE or a macroset created with MACROSET. If it is the name of both a macro and a macroset, either -d must be given to specify the DEFINE-created macro or -s must be given to specify the MACROSET-created macroset.",
+		helpInvoke: "<old_name OR -d> <new_name> [-m] [-s]",
+		helpDesc:   "Renames the item referred to by old_name to new_name. The old_name must be either a macro created with DEFINE or a macroset created with MACROSET, or -d to specify the default macroset. If it is the name of both a macro and a macroset, either -m must be given to specify the DEFINE-created macro or -s must be given to specify the MACROSET-created macroset.",
 		argsExec:   executeCommandRename,
 	},
 	"LISTSETS": {
@@ -359,12 +359,12 @@ var commands = commandList{
 		argsExec: executeCommandListsets,
 	},
 	"EXPORT": command{
-		helpInvoke: "filename [-c] [-s macroset1 [... -s macrosetN]]",
+		helpInvoke: "<filename> [-c] [-s macroset1 [... -s macrosetN]]",
 		helpDesc:   "Exports the current macro definitions to the given filename, to be loaded via a later call to IMPORT or by giving the definitions file to use when launching netkk with --macrofile. By default the macros in all macrosets are included; this can be changed by giving any combination of -c and one or more -s options. Giving -c specifies the current macroset, and -m followed by the name of a macroset specifies that macroset.",
 		argsExec:   executeCommandExport,
 	},
 	"IMPORT": command{
-		helpInvoke: "filename [-r]",
+		helpInvoke: "<filename> [-r]",
 		helpDesc:   "Imports macro definitions in the given file. By default they extend the ones already defined; if -r is given, all macrosets are cleared and removed before using the ones in the file.",
 		argsExec:   executeCommandImport,
 	},
@@ -575,22 +575,12 @@ func executeCommandDefine(state *consoleState, line string, cmdName string) (str
 		return "", fmt.Errorf("empty macros are not allowed; give contents of macro after name")
 	}
 	macroName := parts[1]
-	if !identifierRegex.MatchString(macroName) {
-		return "", fmt.Errorf("%q is not a valid macro name", macroName)
-	}
 
 	// done checking args
-
-	// make if the current macroset doesn't yet exist
-	if _, ok := state.macrosets[state.curMacroset]; !ok {
-		state.macrosets[state.curMacroset] = make(macroset)
+	alreadyExists := state.macros.IsDefined(macroName)
+	if err := state.macros.Define(macroName, strings.Join(parts[2:], " ")); err != nil {
+		return "", err
 	}
-	_, alreadyExists := state.macrosets[state.curMacroset][strings.ToUpper(macroName)]
-	state.macrosets[state.curMacroset][strings.ToUpper(macroName)] = macro{
-		name:    macroName,
-		content: strings.Join(parts[2:], " "),
-	}
-
 	if alreadyExists {
 		return state.out.InfoSprintf("Updated %q to new contents", macroName), nil
 	}
@@ -611,10 +601,7 @@ func executeCommandUndefine(state *consoleState, argv []string) (output string, 
 		},
 		posArgActions{
 			func(i *int, argv []string) error {
-				if !identifierRegex.MatchString(argv[*i]) {
-					return fmt.Errorf("%q is not a valid macro name", argv[*i])
-				}
-				macroName = strings.ToUpper(argv[*i])
+				macroName = argv[*i]
 				return nil
 			},
 		},
@@ -624,20 +611,85 @@ func executeCommandUndefine(state *consoleState, argv []string) (output string, 
 	}
 
 	// if the current macroset doesn't yet exist, there's nothing to not define.
-	curSet, ok := state.macrosets[state.curMacroset]
-	if !ok {
-		return state.out.InfoSprintf("%q is not currently a defined macro, so not doing anything", argv[1]), nil
-	}
-	macro, alreadyExists := curSet[macroName]
-	if alreadyExists {
-		if doReplacement {
-			state.replaceMacro
-		}
-
-		delete(state.macrosets[state.curMacroset], macroName)
-		return state.out.InfoSprintf("Deleted macro %q", macro.name), nil
+	if state.macros.Undefine(macroName, doReplacement) {
+		return state.out.InfoSprintf("Deleted macro %q", macroName), nil
 	}
 	return state.out.InfoSprintf("%q is not currently a defined macro, so not doing anything", argv[1]), nil
+}
+
+func executeCommandList(state *consoleState, argv []string) (output string, err error) {
+	var listAll bool
+	includeSet := []string{}
+
+	argv, err = parseCommandFlags(
+		argv,
+		flagActions{
+			'a': func(i *int, argv []string) error {
+				listAll = true
+				return nil
+			},
+			'm': func(i *int, argv []string) error {
+				if *i+1 >= len(argv) {
+					return fmt.Errorf("argument required after -m")
+				}
+				includeSet = append(includeSet, argv[*i+1])
+
+				// we have consumed an extra item, so bump up i and continue
+				*i = *i + 1
+
+				return nil
+			},
+		},
+		nil,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	if listAll {
+		includeSet = state.macros.GetSetNames()
+	}
+
+	var sb strings.Builder
+	if len(includeSet) > 0 {
+		for _, setName := range includeSet {
+			if setName == "" {
+				sb.WriteString("(default macroset):\n")
+			} else {
+				sb.WriteString("MACROSET ")
+				sb.WriteString(setName)
+				sb.WriteString(":\n")
+			}
+			names := state.macros.GetNamesIn(setName)
+			if len(names) < 1 {
+				sb.WriteString("  (none defined)\n")
+			} else {
+				for _, macro := range names {
+					sb.WriteString("  ")
+					sb.WriteString(macro)
+					sb.WriteRune('\n')
+				}
+			}
+			sb.WriteRune('\n')
+		}
+	} else {
+		for _, mName := range state.macros.GetNames() {
+			sb.WriteString(mName)
+			sb.WriteRune('\n')
+		}
+	}
+
+	return sb.String(), nil
+}
+
+func executeCommandShow(state *consoleState, argv []string) (output string, err error) {
+	if len(argv) < 2 {
+		return "", fmt.Errorf("need to give name of macro to show")
+	}
+	if !state.macros.IsDefined(argv[1]) {
+		return "", fmt.Errorf("%q is not a defined macro", argv[1])
+	}
+	return state.macros.Get(argv[1]), nil
 }
 
 // ExecuteScript executes script input from the given reader.
@@ -659,7 +711,7 @@ func executeCommandUndefine(state *consoleState, argv []string) (output string, 
 // If the provided line is empty after removing comments and trimming, no action is taken and the empty string
 // is returned.
 func ExecuteScript(f io.Reader, conn driver.Connection, out verbosity.OutputWriter, version string, delimitWithSemicolon bool) (lines int, err error) {
-	state := &consoleState{connection: conn, macrosets: map[string]macroset{"": make(macroset)}, version: version, out: out, interactive: false, delimitWithSemicolon: delimitWithSemicolon}
+	state := &consoleState{connection: conn, version: version, out: out, interactive: false, delimitWithSemicolon: delimitWithSemicolon}
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
 	numLinesRead := 0
@@ -715,7 +767,6 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 		interactive:          true,
 		language:             language,
 		delimitWithSemicolon: delimitWithSemicolon,
-		macrosets:            map[string]macroset{"": make(macroset)},
 	}
 
 	// sleep until ready

@@ -217,8 +217,10 @@ func (set macroset) replaceAllMacro(name string, replacement string) {
 //
 // The zero value for MacroCollection is ready to be used.
 type MacroCollection struct {
-	cur  string
-	sets map[string]macroset
+	cur      string
+	curName  string
+	sets     map[string]macroset
+	setNames map[string]string
 }
 
 // IsDefined returns whether the given macro is defined in the current
@@ -239,10 +241,20 @@ func (mc *MacroCollection) Define(macro, content string) error {
 	if mc.sets == nil {
 		mc.sets = make(map[string]macroset)
 	}
-	if mc.sets[mc.cur] == nil {
+	if _, ok := mc.sets[mc.cur]; !ok {
 		mc.sets[mc.cur] = make(macroset)
+		mc.setNames[mc.cur] = mc.curName
 	}
 	return mc.sets[mc.cur].Define(macro, content)
+}
+
+// Get gets the contents of a macro. The name is case insensitive.
+// If the macro does not exist, the empty string is returned.
+func (mc *MacroCollection) Get(macro string) string {
+	if !mc.IsDefined(macro) {
+		return ""
+	}
+	return mc.sets[mc.cur].Get(macro)
 }
 
 // Undefine removes a definition for a macro of the given name in the current
@@ -253,10 +265,56 @@ func (mc *MacroCollection) Undefine(macro string, replace bool) bool {
 	if mc.sets == nil {
 		return false
 	}
-	if mc.sets[mc.cur] == nil {
+	if _, ok := mc.sets[mc.cur]; !ok {
 		return false
 	}
 	return mc.sets[mc.cur].Undefine(macro, replace)
+}
+
+// SetCurrentSet allows the current macroset name to be given. If it doesn't yet exist,
+// it will be created on the first call to Define.
+func (mc *MacroCollection) SetCurrentSet(setName string) {
+	mc.cur = strings.ToUpper(setName)
+	mc.curName = setName
+}
+
+// GetCurrentSet shows the name for the current macroset.
+func (mc *MacroCollection) GetCurrentSet() string {
+	return mc.curName
+}
+
+// RenameSet allows a set to be redefined. If the default
+// set "" is renamed, it is copied to the new name and a new
+// default set is created.
+func (mc *MacroCollection) RenameSet(oldName, newName string) error {
+	if !mc.SetIsDefined(oldName) {
+		return fmt.Errorf("no macroset named %q exists", oldName)
+	}
+	if !identifierRegex.MatchString(newName) {
+		return fmt.Errorf("%q is not a valid macroset name", newName)
+	}
+
+	old := strings.ToUpper(oldName)
+	new := strings.ToUpper(newName)
+	mc.sets[new] = mc.sets[old]
+	mc.setNames[new] = newName
+	delete(mc.sets, old)
+	delete(mc.setNames, old)
+
+	if mc.cur == oldName {
+		mc.cur = new
+		mc.curName = newName
+	}
+	return nil
+}
+
+// Rename changes the name of a macro in the current macroset. If replace is given,
+// also updates all usages of the macro's name in all other macros to match.
+func (mc *MacroCollection) Rename(oldName string, newName string, replace bool) error {
+	if !mc.IsDefined(oldName) {
+		return fmt.Errorf("no macro named %q exists", oldName)
+	}
+	return mc.sets[mc.cur].Rename(oldName, newName, replace)
 }
 
 // GetNames gives a list of all macro names in the current set.
@@ -264,7 +322,7 @@ func (mc *MacroCollection) GetNames() []string {
 	if mc.sets == nil {
 		return nil
 	}
-	if mc.sets[mc.cur] == nil {
+	if _, ok := mc.sets[mc.cur]; !ok {
 		return nil
 	}
 	return mc.sets[mc.cur].GetAll()
@@ -276,20 +334,44 @@ func (mc *MacroCollection) GetNamesIn(setName string) []string {
 		return nil
 	}
 
-	if mc.sets[strings.ToUpper(setName)] == nil {
+	if _, ok := mc.sets[strings.ToUpper(setName)]; !ok {
 		return nil
 	}
 	return mc.sets[strings.ToUpper(setName)].GetAll()
 }
 
-// GetSetNames gives a list of all defined macroset names with at least one item each.
+// GetSetNames gives a list of all defined macroset names, including the current one.
 func (mc *MacroCollection) GetSetNames() []string {
 	names := []string{}
+	addedBlank := false
 	if mc.sets == nil {
 		return nil
 	}
-	if mc.sets[mc.cur] == nil {
-		return nil
+	for k := range mc.sets {
+		if k == "" {
+			addedBlank = true
+		}
+		names = append(names, mc.setNames[k])
 	}
-	return mc.sets[mc.cur].GetAll()
+	if !mc.SetIsDefined(mc.cur) {
+		if mc.cur == "" {
+			addedBlank = true
+		}
+		names = append(names, mc.cur)
+	}
+	if !addedBlank {
+		names = append(names, "")
+	}
+
+	sort.Strings(names)
+	return names
+}
+
+// SetIsDefined returns whether the given macroset is defined with items.
+func (mc *MacroCollection) SetIsDefined(setName string) bool {
+	if mc.sets == nil {
+		return false
+	}
+	_, exists := mc.sets[strings.ToUpper(setName)]
+	return exists
 }
