@@ -273,9 +273,13 @@ func (mc *MacroCollection) Undefine(macro string, replace bool) bool {
 
 // SetCurrentSet allows the current macroset name to be given. If it doesn't yet exist,
 // it will be created on the first call to Define.
-func (mc *MacroCollection) SetCurrentSet(setName string) {
+func (mc *MacroCollection) SetCurrentSet(setName string) error {
+	if !identifierRegex.MatchString(setName) {
+		return fmt.Errorf("%q is not a valid macroset name", setName)
+	}
 	mc.cur = strings.ToUpper(setName)
 	mc.curName = setName
+	return nil
 }
 
 // GetCurrentSet shows the name for the current macroset.

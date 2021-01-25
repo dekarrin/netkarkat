@@ -345,13 +345,13 @@ var commands = commandList{
 		argsExec:   executeCommandShow,
 	},
 	"MACROSET": {
-		helpInvoke: "[macroset_name] [-d]",
+		helpInvoke: "[macroset_name OR -d]",
 		helpDesc:   "Without arguments, gives the name of the current macroset. If a name is given, switches the current macroset to the given one, which makes all DEFINE calls made while that macroset was active also go inactive. All further DEFINES will then apply to the switched-to macroset. If the macroset did not already exist, it is created. If -d is given instead of a macroset name, the current macroset switches to the default one. Macroset names are case-insensitive.",
 		argsExec:   executeCommandMacroset,
 	},
 	"RENAME": {
-		helpInvoke: "<old_name OR -d> <new_name> [-m] [-s]",
-		helpDesc:   "Renames the item referred to by old_name to new_name. The old_name must be either a macro created with DEFINE or a macroset created with MACROSET, or -d to specify the default macroset. If it is the name of both a macro and a macroset, either -m must be given to specify the DEFINE-created macro or -s must be given to specify the MACROSET-created macroset.",
+		helpInvoke: "[-m OR -s] <old_name OR -d> <new_name>",
+		helpDesc:   "Renames the item referred to by old_name to new_name. The old_name must be either a macro created with DEFINE or a macroset created with MACROSET, or -d to specify the default macroset. If old_name is the name of both a macro and a macroset, either -m must be given to specify the DEFINE-created macro or -s must be given to specify the MACROSET-created macroset.",
 		argsExec:   executeCommandRename,
 	},
 	"LISTSETS": {
@@ -600,9 +600,11 @@ func executeCommandUndefine(state *consoleState, argv []string) (output string, 
 			},
 		},
 		posArgActions{
-			func(i *int, argv []string) error {
-				macroName = argv[*i]
-				return nil
+			{
+				parse: func(i *int, argv []string) error {
+					macroName = argv[*i]
+					return nil
+				},
 			},
 		},
 	)
@@ -690,6 +692,117 @@ func executeCommandShow(state *consoleState, argv []string) (output string, err 
 		return "", fmt.Errorf("%q is not a defined macro", argv[1])
 	}
 	return state.macros.Get(argv[1]), nil
+}
+
+func executeCommandMacroset(state *consoleState, argv []string) (output string, err error) {
+	var swapToDefault bool
+	var swapTo string
+	argv, err = parseCommandFlags(
+		argv,
+		flagActions{
+			'd': func(i *int, argv []string) error {
+				swapToDefault = true
+				return nil
+			},
+		},
+		posArgActions{
+			{
+				parse: func(i *int, argv []string) error {
+					if argv[*i] == "" {
+						return fmt.Errorf("blank macroset name is not allowed; use -d to switch to the default macroset")
+					}
+					swapTo = argv[*i]
+					return nil
+				},
+				optional: true,
+			},
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+
+	if swapTo != "" && swapToDefault {
+		return "", fmt.Errorf("both -d and a macroset name were given; only one is allowed")
+	}
+
+	if swapToDefault {
+		if err := state.macros.SetCurrentSet(""); err != nil {
+			return "", err
+		}
+		return state.out.InfoSprintf("Switched current macroset to the default one."), nil
+	} else if swapTo != "" {
+		if err := state.macros.SetCurrentSet(swapTo); err != nil {
+			return "", err
+		}
+		return state.out.InfoSprintf("Switched current macroset to %q.", swapTo), nil
+	}
+
+	// and the last case, no args, user just wants to know the current one.
+	// do not mask behind verbosity as user specifically requested this and it should
+	// show even in the queitest of modes.
+	curSetName := state.macros.GetCurrentSet()
+	if curSetName == "" {
+		return "(default macroset)", nil
+	}
+	return curSetName, nil
+}
+
+func executeCommandRename(state *consoleState, argv []string) (output string, err error) {
+	// "[-m OR -s] <old_name OR -d> <new_name>"
+
+	var isMacro, isSet, isDefaultSet bool
+	var oldName, newName string
+
+	argv, err = parseCommandFlags(
+		argv,
+		flagActions{
+			'd': func(i *int, argv []string) error {
+				swapToDefault = true
+				return nil
+			},
+		},
+		posArgActions{
+			{
+				parse: func(i *int, argv []string) error {
+					if argv[*i] == "" {
+						return fmt.Errorf("blank macroset name is not allowed; use -d to switch to the default macroset")
+					}
+					swapTo = argv[*i]
+					return nil
+				},
+				optional: true,
+			},
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+
+	if swapTo != "" && swapToDefault {
+		return "", fmt.Errorf("both -d and a macroset name were given; only one is allowed")
+	}
+
+	if swapToDefault {
+		if err := state.macros.SetCurrentSet(""); err != nil {
+			return "", err
+		}
+		return state.out.InfoSprintf("Switched current macroset to the default one."), nil
+	} else if swapTo != "" {
+		if err := state.macros.SetCurrentSet(swapTo); err != nil {
+			return "", err
+		}
+		return state.out.InfoSprintf("Switched current macroset to %q.", swapTo), nil
+	}
+
+	// and the last case, no args, user just wants to know the current one.
+	// do not mask behind verbosity as user specifically requested this and it should
+	// show even in the queitest of modes.
+	curSetName := state.macros.GetCurrentSet()
+	if curSetName == "" {
+		return "(default macroset)", nil
+	}
+	return curSetName, nil
 }
 
 // ExecuteScript executes script input from the given reader.
