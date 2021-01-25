@@ -5,6 +5,8 @@ IF [%MSYSTEM%]==[] (
   %scriptpath%netkk.exe %*
 ) ELSE (
   REM if we're running under msys or related subsystems, instead of doing crazy checking for term capabilities,
-  REM just always launch in winpty mode.
-  winpty %scriptpath%netkk.exe %*
+  REM just always launch in a separate cmd window.
+  REM if user has put MSYS into their CMD env, god help them
+  REM winpty %scriptpath%netkk.exe %* - old line
+  START "NetKarKat" cmd.exe /k "%scriptpath%netkk.exe %* & pause"
 )

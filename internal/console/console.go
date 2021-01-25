@@ -546,6 +546,7 @@ func executeLine(state *consoleState, line string) (cmdOutput string, err error)
 		exitExpected = true
 		return "", err
 	}
+	exitExpected = true
 	return "", nil
 }
 
@@ -1189,6 +1190,7 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 func (state *consoleState) setupConsoleLiner(language string) {
 	state.prompt = liner.NewLiner()
 	state.prompt.SetCtrlCAborts(true)
+	state.prompt.SetBeep(false)
 	state.prompt.SetMultiLineMode(true)
 
 	state.prompt.SetCompleter(func(line string) []string {
