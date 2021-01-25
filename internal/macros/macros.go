@@ -11,6 +11,7 @@ import (
 
 var (
 	identifierRegex = regexp.MustCompile(`^[A-Za-z$_][A-Za-z$_0-9]*$`)
+	setSectionRegex = regexp.MustCompile(`^\[[A-Za-z$_][A-Za-z$_0-9]*\]$`)
 )
 
 type macro struct {
@@ -20,6 +21,11 @@ type macro struct {
 }
 
 type macroset map[string]macro
+
+// Len returns the number of currently defined macros.
+func (set macroset) Len() int {
+	return len(set)
+}
 
 // IsDefined returns whether the given macro is defined in the current
 // macroset. Macro is case-insensitive
@@ -78,24 +84,34 @@ func (set macroset) Import(r io.Reader) error {
 	lineNo := 0
 	for scan.Scan() {
 		lineNo++
-		line := scan.Text()
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) < 1 {
-			return fmt.Errorf("malformed macro definition on line %q", lineNo)
+		line := strings.TrimSpace(scan.Text())
+		if line == "" {
+			continue
 		}
-		name := parts[0]
-		var content string
-		if len(parts) >= 2 {
-			content = parts[1]
+		name, content, err := parseMacroImportLine(line)
+		if err != nil {
+			return err
 		}
 		if err := set.Define(name, content); err != nil {
-			return fmt.Errorf("bad macro on line %q: %v", lineNo, err)
+			return err
 		}
 	}
 	if err := scan.Err(); err != nil {
 		return fmt.Errorf("problem reading input: %v", err)
 	}
 	return nil
+}
+
+func parseMacroImportLine(line string) (name string, content string, err error) {
+	parts := strings.SplitN(line, " ", 2)
+	if len(parts) < 1 {
+		return "", "", fmt.Errorf("blank definition not allowed")
+	}
+	name = parts[0]
+	if len(parts) >= 2 {
+		content = parts[1]
+	}
+	return name, content, nil
 }
 
 // Get gets the contents of the given macro. If it is not defined, empty string
@@ -238,14 +254,21 @@ func (mc MacroCollection) IsDefined(macro string) bool {
 // Define creates a new definition for a macro of the given name in the current macroset. The name is
 // case-insensitive.
 func (mc *MacroCollection) Define(macro, content string) error {
+	return mc.DefineIn("", macro, content)
+}
+
+// DefineIn creates a new definition for a macro of the given name in the given
+// macroset. The names are case-insensitive. If the macroset doesn't yet exist,
+// it is created. The current macroset remains unchanged.
+func (mc *MacroCollection) DefineIn(setName, macroName, content string) error {
 	if mc.sets == nil {
 		mc.sets = make(map[string]macroset)
 	}
-	if _, ok := mc.sets[mc.cur]; !ok {
-		mc.sets[mc.cur] = make(macroset)
-		mc.setNames[mc.cur] = mc.curName
+	if _, ok := mc.sets[strings.ToUpper(setName)]; !ok {
+		mc.sets[strings.ToUpper(setName)] = make(macroset)
+		mc.setNames[strings.ToUpper(setName)] = setName
 	}
-	return mc.sets[mc.cur].Define(macro, content)
+	return mc.sets[strings.ToUpper(setName)].Define(macroName, content)
 }
 
 // Get gets the contents of a macro. The name is case insensitive.
@@ -378,4 +401,184 @@ func (mc *MacroCollection) SetIsDefined(setName string) bool {
 	}
 	_, exists := mc.sets[strings.ToUpper(setName)]
 	return exists
+}
+
+// ExportSet exports the requested macroset to the given writer.
+func (mc *MacroCollection) ExportSet(setName string, w io.Writer) (setsExported int, macrosExported int, err error) {
+	if mc.SetIsDefined(setName) {
+		return 0, 0, fmt.Errorf("no macroset named %q exists", setName)
+	}
+
+	bufW := bufio.NewWriter(w)
+
+	if setName != "" {
+		definedName := mc.setNames[strings.ToUpper(setName)]
+		// write section header
+		if _, err := bufW.WriteRune('['); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+		}
+		if _, err := bufW.WriteString(definedName); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+		}
+		if _, err := bufW.WriteString("]\n"); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+		}
+		// we're about to pass control of underlying writer to another routine;
+		// flush our buffering first
+		if err := bufW.Flush(); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+		}
+	}
+
+	// then write actual macros
+	set := mc.sets[strings.ToUpper(setName)]
+	if err := set.Export(w); err != nil {
+		return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+	}
+	if _, err := bufW.WriteRune('\n'); err != nil {
+		return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+	}
+	if err := bufW.Flush(); err != nil {
+		return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+	}
+
+	return 1, set.Len(), nil
+}
+
+// Export exports all macroset definitions to the given writer.
+func (mc *MacroCollection) Export(w io.Writer) (setsExported int, macrosExported int, err error) {
+	if mc.sets == nil {
+		return 0, 0, nil
+	}
+
+	bufW := bufio.NewWriter(w)
+
+	// always do the default one first, and only if it has definitions
+	if mc.SetIsDefined("") {
+		set := mc.sets[""]
+		if err := set.Export(w); err != nil {
+			return 0, 0, fmt.Errorf("while exporting the default macroset: %v", err)
+		}
+		if _, err := bufW.WriteRune('\n'); err != nil {
+			return 0, 0, fmt.Errorf("while exporting the default macroset: %v", err)
+		}
+		if err := bufW.Flush(); err != nil {
+			return 0, 0, fmt.Errorf("while exporting the default macroset: %v", err)
+		}
+		setsExported++
+		macrosExported += set.Len()
+	}
+
+	// alphabetize them
+	setNames := mc.GetSetNames()
+	for _, name := range setNames {
+		if name == "" {
+			// discard the default because it is always in GetSetNames even if not defined
+			// and doing it here may impact ordering.
+			continue
+		}
+
+		// write section header
+		if _, err := bufW.WriteRune('['); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", name, err)
+		}
+		if _, err := bufW.WriteString(name); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", name, err)
+		}
+		if _, err := bufW.WriteString("]\n"); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", name, err)
+		}
+		// we're about to pass control of underlying writer to another routine;
+		// flush our buffering first
+		if err := bufW.Flush(); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", name, err)
+		}
+
+		// then write actual macros
+		set := mc.sets[strings.ToUpper(name)]
+		if err := set.Export(w); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", name, err)
+		}
+		if _, err := bufW.WriteRune('\n'); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", name, err)
+		}
+		if err := bufW.Flush(); err != nil {
+			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", name, err)
+		}
+		macrosExported += set.Len()
+		setsExported++
+	}
+
+	return setsExported, macrosExported, nil
+}
+
+// Import reads macroset definitions from the given writer and applies them
+// to the current macro collection. They are added rather than removed entirely.
+func (mc *MacroCollection) Import(r io.Reader) (setsLoaded int, macrosLoaded int, err error) {
+	// so we dont go into a weird state on error, make all changes
+	// to a new macrocollection to validate then destroy the extra MacroCollection
+	dummy := MacroCollection{}
+
+	scan := bufio.NewScanner(r)
+	lineNo := 0
+	for scan.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scan.Text())
+		if line == "" {
+			continue
+		}
+
+		if setSectionRegex.MatchString(line) {
+			secName := strings.Trim(line, "[]")
+			if err := dummy.SetCurrentSet(secName); err != nil {
+				return 0, 0, fmt.Errorf("on line %d: %v", lineNo, err)
+			}
+		} else {
+			// parse as a macro
+			macroName, macroContent, err := parseMacroImportLine(line)
+			if err != nil {
+				return 0, 0, fmt.Errorf("on line %d: %v", lineNo, err)
+			}
+			if err := dummy.Define(macroName, macroContent); err != nil {
+				return 0, 0, fmt.Errorf("on line %d: %v", lineNo, err)
+			}
+		}
+	}
+	if err := scan.Err(); err != nil {
+		return 0, 0, fmt.Errorf("problem reading input: %v", err)
+	}
+
+	// everything is now fully loaded. time to merge the two.
+	for _, setName := range dummy.GetSetNames() {
+		if dummy.SetIsDefined(setName) {
+			dummySet := dummy.sets[strings.ToUpper(setName)]
+			for _, macroName := range dummySet.GetAll() {
+				macroContent := dummySet.Get(macroName)
+				if err := mc.DefineIn(setName, macroName, macroContent); err != nil {
+					// should never happen
+					return 0, 0, fmt.Errorf("got problem copying from dummy mc to new one: %v", err)
+				}
+				macrosLoaded++
+			}
+			setsLoaded++
+		}
+	}
+
+	return setsLoaded, macrosLoaded, nil
+}
+
+// Clear removes all currently-defined macrosets as well as their definitions.
+// The current set remains as it was prior to the clear, even if that set is cleared.
+func (mc *MacroCollection) Clear() {
+	if mc.sets == nil {
+		return
+	}
+
+	for _, setName := range mc.GetSetNames() {
+		if setName != "" || mc.IsDefined("") {
+			mc.sets[strings.ToUpper(setName)].Clear()
+			delete(mc.sets, strings.ToUpper(setName))
+			delete(mc.setNames, strings.ToUpper(setName))
+		}
+	}
 }

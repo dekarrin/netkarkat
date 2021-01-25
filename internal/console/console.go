@@ -350,8 +350,8 @@ var commands = commandList{
 		argsExec:   executeCommandMacroset,
 	},
 	"RENAME": {
-		helpInvoke: "[-m OR -s] <old_name OR -d> <new_name>",
-		helpDesc:   "Renames the item referred to by old_name to new_name. The old_name must be either a macro created with DEFINE or a macroset created with MACROSET, or -d to specify the default macroset. If old_name is the name of both a macro and a macroset, either -m must be given to specify the DEFINE-created macro or -s must be given to specify the MACROSET-created macroset.",
+		helpInvoke: "[-r] [-m OR -s] <old_name OR -d> <new_name>",
+		helpDesc:   "Renames the item referred to by old_name to new_name. The old_name must be either a macro created with DEFINE or a macroset created with MACROSET, or -d to specify the default macroset. If old_name is the name of both a macro and a macroset, either -m must be given to specify the DEFINE-created macro or -s must be given to specify the MACROSET-created macroset. If a macro is being renamed and -r is given, its usage will be replaced with its new name in all other macros that refer to it.",
 		argsExec:   executeCommandRename,
 	},
 	"LISTSETS": {
@@ -751,58 +751,281 @@ func executeCommandMacroset(state *consoleState, argv []string) (output string, 
 func executeCommandRename(state *consoleState, argv []string) (output string, err error) {
 	// "[-m OR -s] <old_name OR -d> <new_name>"
 
-	var isMacro, isSet, isDefaultSet bool
-	var oldName, newName string
+	var isMacro, isSet, isDefaultSet, doReplacement bool
+	var firstName, secondName string
+
+	posArgs := posArgActions{
+		// oldName:
+		{
+			parse: func(i *int, argv []string) error {
+				if argv[*i] == "" {
+					return fmt.Errorf("blank name is not allowed; use -d if attempting to specify the default macroset")
+				}
+				firstName = argv[*i]
+				return nil
+			},
+		},
+
+		// newName:
+		{
+			parse: func(i *int, argv []string) error {
+				if argv[*i] == "" {
+					return fmt.Errorf("blank new name is not allowed")
+				}
+				secondName = argv[*i]
+				return nil
+			},
+		},
+	}
 
 	argv, err = parseCommandFlags(
 		argv,
 		flagActions{
+			'm': func(i *int, argv []string) error {
+				if isDefaultSet {
+					return fmt.Errorf("-d implies -s; cannot also give -m")
+				}
+				if isSet {
+					return fmt.Errorf("cannot set both -s and -m; select one")
+				}
+				isMacro = true
+				return nil
+			},
+			'r': func(i *int, argv []string) error {
+				doReplacement = true
+				return nil
+			},
+			's': func(i *int, argv []string) error {
+				if isMacro {
+					return fmt.Errorf("cannot set both -s and -m; select one")
+				}
+				isSet = true
+				return nil
+			},
 			'd': func(i *int, argv []string) error {
-				swapToDefault = true
+				if isMacro {
+					return fmt.Errorf("-d implies -s; cannot also give -m")
+				}
+				isSet = true
+				isDefaultSet = true
+
+				// this also makes "new name" optional; the "old name" is actually
+				// going to be the new name in this case.
+				posArgs[1] = argParsePosAction{
+					parse:    posArgs[1].parse,
+					optional: true,
+				}
+
+				return nil
+			},
+		},
+		posArgs,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	if isDefaultSet {
+		if doReplacement {
+			return "", fmt.Errorf("-r can only be given for macros, not sets")
+		}
+		err := state.macros.RenameSet("", firstName)
+		if err != nil {
+			return "", err
+		}
+		return state.out.InfoSprintf("Saved the current default set to new name %q", firstName), nil
+	}
+
+	// if user has not specified whether macro or set, need to do more work to decide
+	if !isSet && !isMacro {
+		isMacro = state.macros.IsDefined(firstName)
+		isSet = state.macros.SetIsDefined(firstName)
+		if isMacro && isSet {
+			return "", fmt.Errorf("%q refers to both a macroset and to a macro in the current macroset; specify which with -s or -m", firstName)
+		}
+		if !isMacro && !isSet {
+			return "", fmt.Errorf("there is not currently any macroset or macro called %q", firstName)
+		}
+	}
+
+	// okay by now it either is a macro or a macroset
+	if isSet {
+		if doReplacement {
+			return "", fmt.Errorf("-r can only be given for macros, not sets")
+		}
+		err := state.macros.RenameSet(firstName, secondName)
+		if err != nil {
+			return "", err
+		}
+		return state.out.InfoSprintf("Renamed macroset %q to %q", firstName, secondName), nil
+	} else if isMacro {
+		err := state.macros.Rename(firstName, secondName, doReplacement)
+		if err != nil {
+			return "", err
+		}
+		msg := "Renamed macro %q to %q"
+		if doReplacement {
+			msg += " and updated all usages in other macros to match"
+		}
+		return state.out.InfoSprintf(msg, firstName, secondName), nil
+	}
+
+	// should never get here
+	return "", fmt.Errorf("neither -m nor -s specified and autodetection is incomplete")
+}
+
+func executeCommandListsets(state *consoleState, argv []string) (output string, err error) {
+	var sb strings.Builder
+	names := state.macros.GetSetNames()
+	for _, n := range names {
+		if n == "" {
+			sb.WriteString("(default macroset)\n")
+		} else {
+			sb.WriteString(n)
+			sb.WriteRune('\n')
+		}
+	}
+	return sb.String(), nil
+}
+
+func executeCommandImport(state *consoleState, argv []string) (output string, err error) {
+	//" export - <filename> [-c] [-s macroset1 [... -s macrosetN]]",
+	// import - <filename> [-r]
+
+	var importFile *os.File
+	var doReplace bool
+	argv, err = parseCommandFlags(
+		argv,
+		flagActions{
+			'r': func(i *int, argv []string) error {
+				doReplace = true
 				return nil
 			},
 		},
 		posArgActions{
 			{
 				parse: func(i *int, argv []string) error {
-					if argv[*i] == "" {
-						return fmt.Errorf("blank macroset name is not allowed; use -d to switch to the default macroset")
+					f, err := os.Open(argv[*i])
+					if err != nil {
+						return fmt.Errorf("could not import file: %v", err)
 					}
-					swapTo = argv[*i]
+					importFile = f
 					return nil
 				},
-				optional: true,
 			},
 		},
 	)
+	if importFile != nil {
+		defer importFile.Close()
+	}
 	if err != nil {
 		return "", err
 	}
 
-	if swapTo != "" && swapToDefault {
-		return "", fmt.Errorf("both -d and a macroset name were given; only one is allowed")
+	successFmt := "Loaded %d total macro%s in %d total macroset%s"
+	if doReplace {
+		state.macros.Clear()
+		successFmt = "Replaced all macros with %d total macro%s in %d total macroset%s"
+	}
+	setCount, macroCount, err := state.macros.Import(importFile)
+	if err != nil {
+		return "", err
 	}
 
-	if swapToDefault {
-		if err := state.macros.SetCurrentSet(""); err != nil {
-			return "", err
-		}
-		return state.out.InfoSprintf("Switched current macroset to the default one."), nil
-	} else if swapTo != "" {
-		if err := state.macros.SetCurrentSet(swapTo); err != nil {
-			return "", err
-		}
-		return state.out.InfoSprintf("Switched current macroset to %q.", swapTo), nil
+	setS := "s"
+	macroS := "s"
+	if setCount == 1 {
+		setS = ""
+	}
+	if macroCount == 1 {
+		macroS = ""
 	}
 
-	// and the last case, no args, user just wants to know the current one.
-	// do not mask behind verbosity as user specifically requested this and it should
-	// show even in the queitest of modes.
-	curSetName := state.macros.GetCurrentSet()
-	if curSetName == "" {
-		return "(default macroset)", nil
+	return state.out.InfoSprintf(successFmt, macroCount, macroS, setCount, setS), nil
+}
+
+func executeCommandExport(state *consoleState, argv []string) (output string, err error) {
+	//"<filename> [-c] [-s macroset1 [... -s macrosetN]]",
+
+	var exportFile *os.File
+	includeSet := make(map[string]bool)
+	argv, err = parseCommandFlags(
+		argv,
+		flagActions{
+			'c': func(i *int, argv []string) error {
+				includeSet[state.macros.GetCurrentSet()] = true
+				return nil
+			},
+			's': func(i *int, argv []string) error {
+				if *i+1 >= len(argv) {
+					return fmt.Errorf("-s requires an argument")
+				}
+				*i++
+				if argv[*i] == "" {
+					return fmt.Errorf("-s requires a non-empty argument")
+				}
+				includeSet[argv[*i]] = true
+				return nil
+			},
+		},
+		posArgActions{
+			{
+				parse: func(i *int, argv []string) error {
+					f, err := os.Create(argv[*i])
+					if err != nil {
+						return fmt.Errorf("could not import file: %v", err)
+					}
+					exportFile = f
+					return nil
+				},
+			},
+		},
+	)
+	if exportFile != nil {
+		defer exportFile.Close()
 	}
-	return curSetName, nil
+	if err != nil {
+		return "", err
+	}
+
+	var totalSets, totalMacros int
+	if len(includeSet) > 0 {
+		includedMacrosets := []string{}
+		for k := range includeSet {
+			includedMacrosets = append(includedMacrosets, k)
+		}
+		sort.Strings(includedMacrosets)
+
+		for _, macrosetName := range includedMacrosets {
+			if state.macros.SetIsDefined(macrosetName) {
+				setCount, macroCount, err := state.macros.ExportSet(macrosetName, exportFile)
+				if err != nil {
+					return "", err
+				}
+				totalSets += setCount
+				totalMacros += macroCount
+			}
+		}
+	} else {
+		var err error
+		totalSets, totalMacros, err = state.macros.Export(exportFile)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	macroS := "s"
+	setS := "s"
+
+	if totalSets == 1 {
+		setS = ""
+	}
+	if totalMacros == 1 {
+		macroS = ""
+	}
+
+	message := "Wrote %d total macro%s in %d macroset%s"
+	return state.out.InfoSprintf(message, totalMacros, macroS, totalSets, setS), nil
 }
 
 // ExecuteScript executes script input from the given reader.
