@@ -320,17 +320,17 @@ var commands = commandList{
 		aliasFor: "EXIT",
 	},
 	"SEND": command{
-		helpInvoke: "<bytes...>",
+		helpInvoke: "bytes...",
 		helpDesc:   "Sends bytes. This command is assumed when no other command is given.",
 		lineExec:   executeCommandSend,
 	},
 	"DEFINE": command{
-		helpInvoke: "<macro> <bytes...>",
+		helpInvoke: "macro bytes...",
 		helpDesc:   "Create a macro that can be typed instead of a sequence of bytes; after DEFINE is used, the supplied name will be interpreted to be the supplied bytes in any context that takes bytes. Macros can also be used in other macro definitions, and will update the macro they are in when their own contents change. Macro names are case-insensitive.",
 		lineExec:   executeCommandDefine,
 	},
 	"UNDEFINE": command{
-		helpInvoke: "[-r] <macro>",
+		helpInvoke: "[-r] macro",
 		helpDesc:   "Remove the definition of an existing macro created in a previous call to DEFINE. By default, any other macros that included the removed macro in their definitions will simply keep them as the bytes that represent the characters in the deleted macro's name; to have them replace it with its previous contents and continue to function as before, give the -r flag. Macro names are case-insensitive.",
 		argsExec:   executeCommandUndefine,
 	},
@@ -340,18 +340,18 @@ var commands = commandList{
 		argsExec:   executeCommandList,
 	},
 	"SHOW": command{
-		helpInvoke: "<macro>",
+		helpInvoke: "macro",
 		helpDesc:   "Show the contents of a macro in the current macroset. Macro names are case-insensitive.",
 		argsExec:   executeCommandShow,
 	},
 	"MACROSET": {
-		helpInvoke: "[macroset_name OR -d]",
+		helpInvoke: "[-d] [name]",
 		helpDesc:   "Without arguments, gives the name of the current macroset. If a name is given, switches the current macroset to the given one, which makes all DEFINE calls made while that macroset was active also go inactive. All further DEFINES will then apply to the switched-to macroset. If the macroset did not already exist, it is created. If -d is given instead of a macroset name, the current macroset switches to the default one. Macroset names are case-insensitive.",
 		argsExec:   executeCommandMacroset,
 	},
 	"RENAME": {
-		helpInvoke: "[-r] [-m OR -s] <old_name OR -d> <new_name>",
-		helpDesc:   "Renames the item referred to by old_name to new_name. The old_name must be either a macro created with DEFINE or a macroset created with MACROSET, or -d to specify the default macroset. If old_name is the name of both a macro and a macroset, either -m must be given to specify the DEFINE-created macro or -s must be given to specify the MACROSET-created macroset. If a macro is being renamed and -r is given, its usage will be replaced with its new name in all other macros that refer to it.",
+		helpInvoke: "[-rmsd] old new",
+		helpDesc:   "Renames the item referred to by old name to new name. The old name must be either a macro created with DEFINE or a macroset created with MACROSET, or -d to specify the default macroset. If old name is the name of both a macro and a macroset, either -m must be given to specify the DEFINE-created macro or -s must be given to specify the MACROSET-created macroset. If a macro is being renamed and -r is given, its usage will be replaced with its new name in all other macros that refer to it.",
 		argsExec:   executeCommandRename,
 	},
 	"LISTSETS": {
@@ -359,12 +359,12 @@ var commands = commandList{
 		argsExec: executeCommandListsets,
 	},
 	"EXPORT": command{
-		helpInvoke: "<filename> [-c] [-s macroset1 [... -s macrosetN]]",
+		helpInvoke: "[-c] [-s macroset] file",
 		helpDesc:   "Exports the current macro definitions to the given filename, to be loaded via a later call to IMPORT or by giving the definitions file to use when launching netkk with --macrofile. By default the macros in all macrosets are included; this can be changed by giving any combination of -c and one or more -s options. Giving -c specifies the current macroset, and -m followed by the name of a macroset specifies that macroset.",
 		argsExec:   executeCommandExport,
 	},
 	"IMPORT": command{
-		helpInvoke: "<filename> [-r]",
+		helpInvoke: "[-r] file",
 		helpDesc:   "Imports macro definitions in the given file. By default they extend the ones already defined; if -r is given, all macrosets are cleared and removed before using the ones in the file.",
 		argsExec:   executeCommandImport,
 	},
@@ -553,9 +553,9 @@ func executeLine(state *consoleState, line string) (cmdOutput string, err error)
 func executeCommandSend(state *consoleState, line string, cmdName string) (output string, err error) {
 	var data []byte
 	if len(line) != len(cmdName) {
-		firstSpace := strings.IndexFunc("", unicode.IsSpace)
+		firstSpace := strings.IndexFunc(line, unicode.IsSpace)
 		if firstSpace <= -1 {
-			state.out.Trace("shouldn't have gotten here in the parse, but should be okay; sending empty data as typical")
+			state.out.Trace("being told to send empty string; skipping line parse")
 		} else {
 			linePastCommand := strings.TrimSpace(line[firstSpace:])
 			data, err = parseLineToBytes(linePastCommand)
@@ -676,9 +676,14 @@ func executeCommandList(state *consoleState, argv []string) (output string, err 
 			sb.WriteRune('\n')
 		}
 	} else {
-		for _, mName := range state.macros.GetNames() {
-			sb.WriteString(mName)
-			sb.WriteRune('\n')
+		names := state.macros.GetNames()
+		if len(names) < 1 {
+			sb.WriteString("(none defined)")
+		} else {
+			for _, mName := range names {
+				sb.WriteString(mName)
+				sb.WriteRune('\n')
+			}
 		}
 	}
 
@@ -890,9 +895,6 @@ func executeCommandListsets(state *consoleState, argv []string) (output string, 
 }
 
 func executeCommandImport(state *consoleState, argv []string) (output string, err error) {
-	//" export - <filename> [-c] [-s macroset1 [... -s macrosetN]]",
-	// import - <filename> [-r]
-
 	var importFile *os.File
 	var doReplace bool
 	argv, err = parseCommandFlags(

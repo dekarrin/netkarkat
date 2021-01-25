@@ -8,5 +8,5 @@ IF [%MSYSTEM%]==[] (
   REM just always launch in a separate cmd window.
   REM if user has put MSYS into their CMD env, god help them
   REM winpty %scriptpath%netkk.exe %* - old line
-  START "NetKarKat" cmd.exe /k "%scriptpath%netkk.exe %* & pause"
+  START "NetKarKat" cmd.exe /C "%scriptpath%netkk.exe %* & pause"
 )
