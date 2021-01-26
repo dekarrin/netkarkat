@@ -254,7 +254,7 @@ func (mc MacroCollection) IsDefined(macro string) bool {
 // Define creates a new definition for a macro of the given name in the current macroset. The name is
 // case-insensitive.
 func (mc *MacroCollection) Define(macro, content string) error {
-	return mc.DefineIn("", macro, content)
+	return mc.DefineIn(mc.GetCurrentSet(), macro, content)
 }
 
 // DefineIn creates a new definition for a macro of the given name in the given
@@ -263,6 +263,7 @@ func (mc *MacroCollection) Define(macro, content string) error {
 func (mc *MacroCollection) DefineIn(setName, macroName, content string) error {
 	if mc.sets == nil {
 		mc.sets = make(map[string]macroset)
+		mc.setNames = make(map[string]string)
 	}
 	if _, ok := mc.sets[strings.ToUpper(setName)]; !ok {
 		mc.sets[strings.ToUpper(setName)] = make(macroset)
@@ -297,7 +298,7 @@ func (mc *MacroCollection) Undefine(macro string, replace bool) bool {
 // SetCurrentSet allows the current macroset name to be given. If it doesn't yet exist,
 // it will be created on the first call to Define.
 func (mc *MacroCollection) SetCurrentSet(setName string) error {
-	if !identifierRegex.MatchString(setName) {
+	if setName != "" && !identifierRegex.MatchString(setName) {
 		return fmt.Errorf("%q is not a valid macroset name", setName)
 	}
 	mc.cur = strings.ToUpper(setName)

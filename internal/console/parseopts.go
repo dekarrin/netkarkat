@@ -73,6 +73,8 @@ func parseCommandFlags(argv []string, flags flagActions, args posArgActions) ([]
 	var arg string
 	for i := 0; i < len(argv); i++ {
 		if i == 0 {
+			// but do put the first arg on the parsedArgs slice
+			parsedArgs = append(parsedArgs, arg)
 			continue
 		}
 		arg = argv[i]
@@ -119,7 +121,7 @@ func parseCommandFlags(argv []string, flags flagActions, args posArgActions) ([]
 	if err != nil {
 		return nil, fmt.Errorf("post-parse positional arg actions error: %v", err)
 	}
-	if curPosItem != numRequiredPosArgs {
+	if curPosItem < numRequiredPosArgs {
 		if numRequiredPosArgs == 1 {
 			return parsedArgs, fmt.Errorf("expected at least 1 argument")
 		}

@@ -121,61 +121,83 @@ func promptWithConnectionMonitor(state *consoleState, prefix string) (string, er
 	return promptResult.s, promptResult.e
 }
 
-func showHelp() string {
+func showHelp(topic string) string {
+	var sb strings.Builder
 	helpWidth := 80
 	nameSuffix := "- "
 
-	// first build the initial
-	leftColumnWidth := -1
-	for name, c := range commands {
-		if c.aliasFor != "" {
-			continue
-		}
-		colName := buildHelpCommandName(name)
-		if utf8.RuneCountInString(colName) > leftColumnWidth {
-			leftColumnWidth = utf8.RuneCountInString(colName)
-		}
-	}
-	leftColumnWidth += utf8.RuneCountInString(nameSuffix)
-	descWidth := helpWidth - leftColumnWidth
-	for descWidth < 2 {
-		helpWidth++
-		descWidth = helpWidth - leftColumnWidth
-	}
-	sb := strings.Builder{}
-	sb.WriteString("Commands:\n")
-	for _, name := range commands.names() {
-		if commands[name].aliasFor != "" {
-			continue
-		}
-		if name == "HELP" || name == "EXIT" { // special cases; these come at the end
-			continue
-		}
-		writeHelpForCommand(name, &sb, descWidth, leftColumnWidth, nameSuffix)
-	}
+	if topic != "" {
+		cmd, ok := commands[strings.ToUpper(topic)]
+		if !ok {
+			sb.WriteString(fmt.Sprintf("Unknown command %q; try just HELP for a list of commands", topic))
+		} else {
+			if cmd.aliasFor != "" {
+				cmd = commands[cmd.aliasFor]
+			}
 
-	writeHelpForCommand("HELP", &sb, descWidth, leftColumnWidth, nameSuffix)
-	writeHelpForCommand("EXIT", &sb, descWidth, leftColumnWidth, nameSuffix)
+			topic = strings.ToUpper(topic)
 
-	suffix := `By default, input will be read until it ends with a semicolon. To change this behavior,
-		use the '--optional-semicolons' flag at launch.
+			leftColumnWidth := utf8.RuneCountInString(buildHelpCommandName(topic))
+			leftColumnWidth += utf8.RuneCountInString(nameSuffix)
+			descWidth := helpWidth - leftColumnWidth
+			for descWidth < 2 {
+				helpWidth++
+				descWidth = helpWidth - leftColumnWidth
+			}
+			writeHelpForCommand(topic, &sb, descWidth, leftColumnWidth, nameSuffix)
+		}
+	} else {
+
+		// first build the initial
+		leftColumnWidth := -1
+		for name, c := range commands {
+			if c.aliasFor != "" {
+				continue
+			}
+			colName := buildHelpCommandName(name)
+			if utf8.RuneCountInString(colName) > leftColumnWidth {
+				leftColumnWidth = utf8.RuneCountInString(colName)
+			}
+		}
+		leftColumnWidth += utf8.RuneCountInString(nameSuffix)
+		descWidth := helpWidth - leftColumnWidth
+		for descWidth < 2 {
+			helpWidth++
+			descWidth = helpWidth - leftColumnWidth
+		}
+		sb.WriteString("Commands:\n")
+		for _, name := range commands.names() {
+			if commands[name].aliasFor != "" {
+				continue
+			}
+			if name == "HELP" || name == "EXIT" { // special cases; these come at the end
+				continue
+			}
+			writeHelpForCommand(name, &sb, descWidth, leftColumnWidth, nameSuffix)
+		}
+
+		writeHelpForCommand("HELP", &sb, descWidth, leftColumnWidth, nameSuffix)
+		writeHelpForCommand("EXIT", &sb, descWidth, leftColumnWidth, nameSuffix)
+
+		suffix := `By default, input will be read until a newline is encountered. To change this behavior,
+		use the '--multiline' flag at launch to read until a semi-colon character is encountered.
 
 		Any input that does not match one of the built-in commands is sent to the
 		remote server and the results are displayed.
 
 		If ":>" is put at the beginning of input, everything after it will be sent to
-		the remote server regardless of whether it matches a built-in command. If a
+		the remote server regardless of whether it matches a built-in command. If a literal
 		":>" needs to be sent as the start of input to the remote server, as in
 		":>input to server", simply put a ":>" in front of it, like so:
 		":>:>input to server".`
 
-	suffixLines := misc.WrapText(suffix, helpWidth)
-	suffixLines = misc.JustifyTextBlock(suffixLines, helpWidth)
-	for _, line := range suffixLines {
-		sb.WriteString(line)
-		sb.WriteRune('\n')
+		suffixLines := misc.WrapText(suffix, helpWidth)
+		suffixLines = misc.JustifyTextBlock(suffixLines, helpWidth)
+		for _, line := range suffixLines {
+			sb.WriteString(line)
+			sb.WriteRune('\n')
+		}
 	}
-
 	return sb.String()
 }
 
@@ -381,9 +403,13 @@ func init() {
 	// have to add this afterwards else we get into an initialization loop
 	commands["HELP"] = command{
 		interactiveOnly: true,
-		helpDesc:        "Show this help",
+		helpInvoke:      " [command]",
+		helpDesc:        "Show this help. If command is given, shows only help on that particular command.",
 		argsExec: func(state *consoleState, argv []string) (string, error) {
-			return showHelp(), nil
+			if len(argv) >= 2 {
+				return showHelp(argv[1]), nil
+			}
+			return showHelp(""), nil
 		},
 	}
 }
@@ -925,10 +951,10 @@ func executeCommandImport(state *consoleState, argv []string) (output string, er
 		return "", err
 	}
 
-	successFmt := "Loaded %d total macro%s in %d total macroset%s"
+	successFmt := "Loaded %d total macro%s in %d macroset%s"
 	if doReplace {
 		state.macros.Clear()
-		successFmt = "Replaced all macros with %d total macro%s in %d total macroset%s"
+		successFmt = "Replaced all macros with %d total macro%s in %d macroset%s"
 	}
 	setCount, macroCount, err := state.macros.Import(importFile)
 	if err != nil {
