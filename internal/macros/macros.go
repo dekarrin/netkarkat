@@ -7,6 +7,14 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
+)
+
+const (
+	// DefaultMinLength is the fewest number of characters that a
+	// macro or macroset name is allowed to have. This is utf-8 safe, and specifies
+	// number of runes, not number of bytes.
+	DefaultMinLength = 3
 )
 
 var (
@@ -14,32 +22,149 @@ var (
 	setSectionRegex = regexp.MustCompile(`^\[[A-Za-z$_][A-Za-z$_0-9]*\]$`)
 )
 
+// objectTypeName just gives what is shown in error message if not valid.
+// does not refer to any golang typing info, i'm just bad at naming things
+func validateName(name string, objectTypeName string, customMinLen int) error {
+	if objectTypeName != "" {
+		objectTypeName = strings.TrimSpace(objectTypeName) + " "
+	}
+
+	if !identifierRegex.MatchString(name) {
+		return fmt.Errorf("%q is not a valid %sname", name, objectTypeName)
+	}
+	if utf8.RuneCountInString(name) < customMinLen {
+		return fmt.Errorf("%snames must be at least %d characters", objectTypeName, customMinLen)
+	}
+	return nil
+}
+
 type macro struct {
 	name    string
 	content string
 	regex   *regexp.Regexp
 }
 
-type macroset map[string]macro
+type macroset struct {
+	name   string
+	macros map[string]macro
+
+	// MinLength is the same as MinLength in MacroCollection.
+	MinLength int
+}
 
 // Len returns the number of currently defined macros.
 func (set macroset) Len() int {
-	return len(set)
+	return len(set.macros)
 }
 
 // IsDefined returns whether the given macro is defined in the current
 // macroset. Macro is case-insensitive
 func (set macroset) IsDefined(macro string) bool {
-	if set == nil {
+	if set.macros == nil {
 		return false
 	}
-	_, ok := set[strings.ToUpper(macro)]
+	_, ok := set.macros[strings.ToUpper(macro)]
 	return ok
+}
+
+// Gets the name of the macroset
+func (set macroset) GetName() string {
+	return set.name
+}
+
+// gives the minimum length if set on the macroset; else returns
+// the default.
+func (set macroset) getMinLength() int {
+	if set.MinLength > 0 {
+		return set.MinLength
+	}
+	return DefaultMinLength
+}
+
+type sortableMacroList []string
+
+func (a sortableMacroList) Len() int {
+	return len(a)
+}
+
+func (a sortableMacroList) Swap(i, j int) {
+	a[i], a[j] = a[j], a[i]
+}
+
+func (a sortableMacroList) Less(i, j int) bool {
+	// we want descending order, so "less" in terms of list order will actually be the one
+	// that is "more" in terms of content (length).
+
+	firstWordRuneCount := utf8.RuneCountInString(a[i])
+	secondWordRuneCount := utf8.RuneCountInString(a[j])
+	if firstWordRuneCount != secondWordRuneCount {
+		return firstWordRuneCount > secondWordRuneCount
+	}
+
+	// they are both equal in length, so give the one that comes last in the
+	// alphabet. comparison must be case-insensitive
+	return strings.ToUpper(a[i]) > strings.ToUpper(a[j])
+}
+
+// Apply does replacement of all applicable macros in the set to the given text.
+// If a loop is detected, the process aborts.
+//
+// Each macro is evaluated when encountered, and the macro in text is replaced
+// with the defined content. If the defined content contains further macros,
+// they will be evaluated first, and this process repeates recursively. If at
+// any point during a recursion a macro is encountered that has already been
+// encountered, it is considered a loop, and the replacement will immediately
+// terminate.
+func (set macroset) Apply(text string) (string, error) {
+	if set.macros == nil {
+		return text, nil
+	}
+	// we must go through in length order, descending.
+	// otherwise longer words would get obscured by them containing
+	// a macro inside of them (e.g. we need to evaluate a macro called
+	// "OrgTeam" before we evaluate a macro called "Org" or "Team".
+	//
+	// EDIT: the above will probably not apply since we are using a regex
+	// with \b at both ends to find the macros. Do the sort anyways because
+	// it is good defensive coding and it shouldn't have issues with
+	// runtime at any reasonable number of macros.
+	allMacros := set.GetAll()
+	sort.Sort(sortableMacroList(allMacros))
+
+	workingText := text
+	for _, name := range allMacros {
+		m := set.macros[strings.ToUpper(name)]
+		m.regex.FindAllString(workingText, 0)
+	}
+	/*
+		A = B hello    // valid definition
+		B = A hello    // valid definition
+
+		using A:
+		"this is A result"
+		-> "this is B hello result"
+		pass 2
+		-> "this is A hello hello result"
+
+		for each replacement: fully run through it and see if we get a macro
+		already encountered. if we do, that is a fucking problem.
+	*/
+}
+
+// Sets the name of the macroset
+func (set *macroset) SetName(name string) error {
+	if err := validateName(name, "macroset", set.getMinLength()); err != nil {
+		return err
+	}
+
+	set.name = name
+
+	return nil
 }
 
 // Export exports all macro definitions to the given writer.
 func (set macroset) Export(w io.Writer) error {
-	if set == nil {
+	if set.macros == nil {
 		return nil
 	}
 
@@ -70,7 +195,7 @@ func (set macroset) Export(w io.Writer) error {
 }
 
 // Clear removes all current macros.
-func (set macroset) Clear() {
+func (set *macroset) Clear() {
 	for _, k := range set.GetAll() {
 		set.Undefine(k, false)
 	}
@@ -78,7 +203,7 @@ func (set macroset) Clear() {
 
 // Import reads all macro definitions from the given reader. They are added to the current
 // set, with any conflicting names replacing the original.
-func (set macroset) Import(r io.Reader) error {
+func (set *macroset) Import(r io.Reader) error {
 	scan := bufio.NewScanner(r)
 
 	lineNo := 0
@@ -120,13 +245,16 @@ func (set macroset) Get(macro string) string {
 	if !set.IsDefined(macro) {
 		return ""
 	}
-	return set[strings.ToUpper(macro)].content
+	return set.macros[strings.ToUpper(macro)].content
 }
 
 // GetAll gets a list of all currently-defined macros.
 func (set macroset) GetAll() []string {
+	if set.macros == nil {
+		return nil
+	}
 	list := []string{}
-	for _, macro := range set {
+	for _, macro := range set.macros {
 		list = append(list, macro.name)
 	}
 	sort.Strings(list)
@@ -135,19 +263,19 @@ func (set macroset) GetAll() []string {
 
 // Rename changes the name of a macro from one definition to another. If replace is given,
 // also updates all usages of the macro's name in all other macros to match.
-func (set macroset) Rename(oldName string, newName string, replace bool) error {
-	if set == nil || !set.IsDefined(oldName) {
+func (set *macroset) Rename(oldName string, newName string, replace bool) error {
+	if set.macros == nil || !set.IsDefined(oldName) {
 		return fmt.Errorf("no macro named %q exists", oldName)
 	}
-	if !identifierRegex.MatchString(newName) {
-		return fmt.Errorf("%q is not a valid macro name", newName)
+	if err := validateName(newName, "macro", set.getMinLength()); err != nil {
+		return err
 	}
 
 	if replace {
 		set.replaceAllMacro(oldName, newName)
 	}
 
-	oldMacro := set[strings.ToUpper(oldName)]
+	oldMacro := set.macros[strings.ToUpper(oldName)]
 	if err := set.Define(newName, oldMacro.content); err != nil {
 		return err
 	}
@@ -157,9 +285,9 @@ func (set macroset) Rename(oldName string, newName string, replace bool) error {
 
 // Define creates a new definition for a macro of the given name. The name is
 // case-insensitive.
-func (set macroset) Define(name string, content string) error {
-	if !identifierRegex.MatchString(name) {
-		return fmt.Errorf("%q is not a valid macro name", name)
+func (set *macroset) Define(name string, content string) error {
+	if err := validateName(name, "macro", set.getMinLength()); err != nil {
+		return err
 	}
 	if set == nil {
 		panic("cant define on a nil macroset")
@@ -173,9 +301,13 @@ func (set macroset) Define(name string, content string) error {
 		regex:   regexp.MustCompile(`(?i)\b` + strings.ReplaceAll(name, "$", `\$`) + `\b`),
 	}
 	if newMacro.regex.MatchString(newMacro.content) {
-		return fmt.Errorf("content includes the macro itself; this is a circular definition")
+		return fmt.Errorf("content includes the macro itself; circular definitions are not allowed")
 	}
-	set[strings.ToUpper(name)] = newMacro
+
+	if set.macros == nil {
+		set.macros = make(map[string]macro)
+	}
+	set.macros[strings.ToUpper(name)] = newMacro
 	return nil
 }
 
@@ -185,40 +317,43 @@ func (set macroset) Define(name string, content string) error {
 // it is deleted.
 //
 // If the one to be undefined does not exist, false is returned.
-func (set macroset) Undefine(macro string, replace bool) (existed bool) {
+func (set *macroset) Undefine(macro string, replace bool) (existed bool) {
 	if set == nil {
 		panic("cant undefine on a nil macroset")
 	}
 	if set.IsDefined(macro) {
 		if replace {
-			set.replaceAllMacro(macro, set[strings.ToUpper(macro)].content)
+			set.replaceAllMacro(macro, set.macros[strings.ToUpper(macro)].content)
 		}
-		delete(set, strings.ToUpper(macro))
+		delete(set.macros, strings.ToUpper(macro))
 		return true
 	}
 	return false
 }
 
-func (set macroset) replaceAllMacro(name string, replacement string) {
+func (set *macroset) replaceAllMacro(name string, replacement string) {
 	if set == nil {
 		return
 	}
-	staleMacro, ok := set[strings.ToUpper(name)]
+	if set.macros == nil {
+		return
+	}
+	staleMacro, ok := set.macros[strings.ToUpper(name)]
 	if !ok {
 		return
 	}
 
 	allMacroNames := []string{}
-	for nameUpper := range set {
+	for nameUpper := range set.macros {
 		allMacroNames = append(allMacroNames, nameUpper)
 	}
 	for _, nameUpper := range allMacroNames {
 		if nameUpper == strings.ToUpper(name) {
 			continue
 		}
-		oldMacro := set[nameUpper]
+		oldMacro := set.macros[nameUpper]
 		newContent := staleMacro.regex.ReplaceAllString(oldMacro.content, replacement)
-		set[nameUpper] = macro{
+		set.macros[nameUpper] = macro{
 			name:    oldMacro.name,
 			content: newContent,
 			regex:   oldMacro.regex,
@@ -233,10 +368,15 @@ func (set macroset) replaceAllMacro(name string, replacement string) {
 //
 // The zero value for MacroCollection is ready to be used.
 type MacroCollection struct {
-	cur      string
-	curName  string
-	sets     map[string]macroset
-	setNames map[string]string
+	// cur is always upper-cased
+	cur string
+
+	sets map[string]macroset
+
+	// MinLength is the minimum number of characters a macro or macroset name is allowed
+	// to be. If set to 0, it falls back to the default of DefaultMinLength in the macro
+	// package.
+	MinLength int
 }
 
 // IsDefined returns whether the given macro is defined in the current
@@ -254,7 +394,7 @@ func (mc MacroCollection) IsDefined(macro string) bool {
 // Define creates a new definition for a macro of the given name in the current macroset. The name is
 // case-insensitive.
 func (mc *MacroCollection) Define(macro, content string) error {
-	return mc.DefineIn(mc.GetCurrentSet(), macro, content)
+	return mc.DefineIn(mc.GetCurrentMacroset(), macro, content)
 }
 
 // DefineIn creates a new definition for a macro of the given name in the given
@@ -263,13 +403,26 @@ func (mc *MacroCollection) Define(macro, content string) error {
 func (mc *MacroCollection) DefineIn(setName, macroName, content string) error {
 	if mc.sets == nil {
 		mc.sets = make(map[string]macroset)
-		mc.setNames = make(map[string]string)
+		mc.sets[""] = macroset{
+			MinLength: mc.MinLength,
+		}
 	}
-	if _, ok := mc.sets[strings.ToUpper(setName)]; !ok {
-		mc.sets[strings.ToUpper(setName)] = make(macroset)
-		mc.setNames[strings.ToUpper(setName)] = setName
+
+	var set macroset
+	if existingSet, ok := mc.sets[strings.ToUpper(setName)]; ok {
+		set = existingSet
+	} else {
+		set = macroset{
+			name:      setName,
+			MinLength: mc.MinLength,
+		}
 	}
-	return mc.sets[strings.ToUpper(setName)].Define(macroName, content)
+
+	if err := set.Define(macroName, content); err != nil {
+		return err
+	}
+	mc.sets[strings.ToUpper(setName)] = set
+	return nil
 }
 
 // Get gets the contents of a macro. The name is case insensitive.
@@ -289,49 +442,90 @@ func (mc *MacroCollection) Undefine(macro string, replace bool) bool {
 	if mc.sets == nil {
 		return false
 	}
-	if _, ok := mc.sets[mc.cur]; !ok {
+	var set macroset
+	if existingSet, ok := mc.sets[mc.cur]; ok {
+		set = existingSet
+	} else {
 		return false
 	}
-	return mc.sets[mc.cur].Undefine(macro, replace)
+
+	macroExisted := set.Undefine(macro, replace)
+	mc.sets[mc.cur] = set
+	return macroExisted
 }
 
-// SetCurrentSet allows the current macroset name to be given. If it doesn't yet exist,
-// it will be created on the first call to Define.
-func (mc *MacroCollection) SetCurrentSet(setName string) error {
-	if setName != "" && !identifierRegex.MatchString(setName) {
-		return fmt.Errorf("%q is not a valid macroset name", setName)
+// SetCurrentMacroset allows the current macroset to be selected. If it
+// doesn't yet exist, it will be created and saved on the first call to Define.
+func (mc *MacroCollection) SetCurrentMacroset(setName string) error {
+	if mc.sets == nil {
+		// the only case where mc.cur will not already exist is the default
+		// macroset, sanity check that this has not been violated
+		if mc.cur != "" {
+			// should never happen
+			return fmt.Errorf("sanity check failed: prev call to SetCurrentMacroset did not properly create macroset")
+		}
+
+		mc.sets = make(map[string]macroset)
 	}
+
+	// if the set does not exist in our table, add it now so we can track the name
+	if _, exists := mc.sets[strings.ToUpper(setName)]; !exists {
+		mc.sets[strings.ToUpper(setName)] = macroset{
+			name:      setName,
+			MinLength: mc.MinLength,
+		}
+	}
+
 	mc.cur = strings.ToUpper(setName)
-	mc.curName = setName
 	return nil
 }
 
-// GetCurrentSet shows the name for the current macroset.
-func (mc *MacroCollection) GetCurrentSet() string {
-	return mc.curName
+// GetCurrentMacroset shows the currently selected Macroset's name.
+func (mc *MacroCollection) GetCurrentMacroset() string {
+	if mc.sets == nil {
+		if mc.cur != "" {
+			panic("sanity check failed: prev call to SetCurrentMacroset did not properly create macroset")
+		}
+
+		// safe to return "non-user-defined" version for default set because it is always blank.
+		return mc.cur
+	}
+
+	return mc.sets[mc.cur].GetName()
 }
 
 // RenameSet allows a set to be redefined. If the default
 // set "" is renamed, it is copied to the new name and a new
 // default set is created.
 func (mc *MacroCollection) RenameSet(oldName, newName string) error {
-	if !mc.SetIsDefined(oldName) {
-		return fmt.Errorf("no macroset named %q exists", oldName)
-	}
-	if !identifierRegex.MatchString(newName) {
-		return fmt.Errorf("%q is not a valid macroset name", newName)
+	// special case for renaming the default macroset when it is empty
+	// (which is allowed)
+	if oldName == "" {
+		if mc.sets == nil {
+			mc.sets = make(map[string]macroset)
+		}
+		if _, exists := mc.sets[""]; !exists {
+			mc.sets[strings.ToUpper(newName)] = macroset{
+				MinLength: mc.MinLength,
+			}
+		}
 	}
 
 	old := strings.ToUpper(oldName)
 	new := strings.ToUpper(newName)
-	mc.sets[new] = mc.sets[old]
-	mc.setNames[new] = newName
+	set, exists := mc.sets[old]
+	if !exists {
+		return fmt.Errorf("no macroset named %q exists", oldName)
+	}
+	set.MinLength = mc.MinLength
+	if err := set.SetName(newName); err != nil {
+		return err
+	}
+	mc.sets[new] = set
 	delete(mc.sets, old)
-	delete(mc.setNames, old)
 
-	if mc.cur == oldName {
+	if mc.cur == old {
 		mc.cur = new
-		mc.curName = newName
 	}
 	return nil
 }
@@ -342,7 +536,12 @@ func (mc *MacroCollection) Rename(oldName string, newName string, replace bool) 
 	if !mc.IsDefined(oldName) {
 		return fmt.Errorf("no macro named %q exists", oldName)
 	}
-	return mc.sets[mc.cur].Rename(oldName, newName, replace)
+	set := mc.sets[mc.cur]
+	if err := set.Rename(oldName, newName, replace); err != nil {
+		return err
+	}
+	mc.sets[mc.cur] = set
+	return nil
 }
 
 // GetNames gives a list of all macro names in the current set.
@@ -379,13 +578,7 @@ func (mc *MacroCollection) GetSetNames() []string {
 		if k == "" {
 			addedBlank = true
 		}
-		names = append(names, mc.setNames[k])
-	}
-	if !mc.SetIsDefined(mc.cur) {
-		if mc.cur == "" {
-			addedBlank = true
-		}
-		names = append(names, mc.cur)
+		names = append(names, mc.sets[k].GetName())
 	}
 	if !addedBlank {
 		names = append(names, "")
@@ -395,55 +588,70 @@ func (mc *MacroCollection) GetSetNames() []string {
 	return names
 }
 
-// SetIsDefined returns whether the given macroset is defined with items.
-func (mc *MacroCollection) SetIsDefined(setName string) bool {
+// IsDefinedMacroset returns whether the given macroset is defined with items.
+func (mc MacroCollection) IsDefinedMacroset(setName string) bool {
+	if !mc.macrosetExists(setName) {
+		return false
+	}
+	return mc.sets[strings.ToUpper(setName)].Len() > 0
+}
+
+// macrosetExists safely checks if it does without checking
+// the items in it.
+func (mc MacroCollection) macrosetExists(setName string) bool {
 	if mc.sets == nil {
 		return false
 	}
-	_, exists := mc.sets[strings.ToUpper(setName)]
-	return exists
+	_, ok := mc.sets[strings.ToUpper(setName)]
+	return ok
 }
 
 // ExportSet exports the requested macroset to the given writer.
 func (mc *MacroCollection) ExportSet(setName string, w io.Writer) (setsExported int, macrosExported int, err error) {
-	if mc.SetIsDefined(setName) {
-		return 0, 0, fmt.Errorf("no macroset named %q exists", setName)
+	if !mc.macrosetExists(setName) {
+		if setName == "" {
+			// default macroset does not error if it does not exist
+		}
+		return 0, 0, fmt.Errorf("no macroset named %q currently exists", setName)
 	}
+
+	set := mc.sets[strings.ToUpper(setName)]
 
 	bufW := bufio.NewWriter(w)
 
-	if setName != "" {
-		definedName := mc.setNames[strings.ToUpper(setName)]
-		// write section header
-		if _, err := bufW.WriteRune('['); err != nil {
+	if set.Len() > 0 {
+		if set.name != "" {
+			// write section header
+			if _, err := bufW.WriteRune('['); err != nil {
+				return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+			}
+			if _, err := bufW.WriteString(set.name); err != nil {
+				return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+			}
+			if _, err := bufW.WriteString("]\n"); err != nil {
+				return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+			}
+			// we're about to pass control of underlying writer to another routine;
+			// flush our buffering first
+			if err := bufW.Flush(); err != nil {
+				return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
+			}
+		}
+
+		// then write actual macros
+		if err := set.Export(w); err != nil {
 			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
 		}
-		if _, err := bufW.WriteString(definedName); err != nil {
+		if _, err := bufW.WriteRune('\n'); err != nil {
 			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
 		}
-		if _, err := bufW.WriteString("]\n"); err != nil {
-			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
-		}
-		// we're about to pass control of underlying writer to another routine;
-		// flush our buffering first
 		if err := bufW.Flush(); err != nil {
 			return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
 		}
+		return 1, set.Len(), nil
 	}
-
-	// then write actual macros
-	set := mc.sets[strings.ToUpper(setName)]
-	if err := set.Export(w); err != nil {
-		return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
-	}
-	if _, err := bufW.WriteRune('\n'); err != nil {
-		return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
-	}
-	if err := bufW.Flush(); err != nil {
-		return 0, 0, fmt.Errorf("while exporting macroset %q: %v", setName, err)
-	}
-
-	return 1, set.Len(), nil
+	// nothing in the set, so go ahead and return no export for this one:
+	return 0, 0, nil
 }
 
 // Export exports all macroset definitions to the given writer.
@@ -455,7 +663,7 @@ func (mc *MacroCollection) Export(w io.Writer) (setsExported int, macrosExported
 	bufW := bufio.NewWriter(w)
 
 	// always do the default one first, and only if it has definitions
-	if mc.SetIsDefined("") {
+	if mc.IsDefinedMacroset("") {
 		set := mc.sets[""]
 		if err := set.Export(w); err != nil {
 			return 0, 0, fmt.Errorf("while exporting the default macroset: %v", err)
@@ -518,7 +726,7 @@ func (mc *MacroCollection) Export(w io.Writer) (setsExported int, macrosExported
 func (mc *MacroCollection) Import(r io.Reader) (setsLoaded int, macrosLoaded int, err error) {
 	// so we dont go into a weird state on error, make all changes
 	// to a new macrocollection to validate then destroy the extra MacroCollection
-	dummy := MacroCollection{}
+	dummy := MacroCollection{MinLength: mc.MinLength}
 
 	scan := bufio.NewScanner(r)
 	lineNo := 0
@@ -531,7 +739,7 @@ func (mc *MacroCollection) Import(r io.Reader) (setsLoaded int, macrosLoaded int
 
 		if setSectionRegex.MatchString(line) {
 			secName := strings.Trim(line, "[]")
-			if err := dummy.SetCurrentSet(secName); err != nil {
+			if err := dummy.SetCurrentMacroset(secName); err != nil {
 				return 0, 0, fmt.Errorf("on line %d: %v", lineNo, err)
 			}
 		} else {
@@ -551,7 +759,7 @@ func (mc *MacroCollection) Import(r io.Reader) (setsLoaded int, macrosLoaded int
 
 	// everything is now fully loaded. time to merge the two.
 	for _, setName := range dummy.GetSetNames() {
-		if dummy.SetIsDefined(setName) {
+		if dummy.IsDefinedMacroset(setName) {
 			dummySet := dummy.sets[strings.ToUpper(setName)]
 			for _, macroName := range dummySet.GetAll() {
 				macroContent := dummySet.Get(macroName)
@@ -576,10 +784,15 @@ func (mc *MacroCollection) Clear() {
 	}
 
 	for _, setName := range mc.GetSetNames() {
-		if setName != "" || mc.IsDefined("") {
-			mc.sets[strings.ToUpper(setName)].Clear()
-			delete(mc.sets, strings.ToUpper(setName))
-			delete(mc.setNames, strings.ToUpper(setName))
+		if setName != "" || mc.IsDefinedMacroset("") {
+			set := mc.sets[strings.ToUpper(setName)]
+			set.Clear()
+			mc.sets[strings.ToUpper(setName)] = set
+			// dont remove the entry if it's the current
+			// or if it's the default
+			if set.name != "" && strings.ToUpper(set.name) != mc.cur {
+				delete(mc.sets, strings.ToUpper(setName))
+			}
 		}
 	}
 }

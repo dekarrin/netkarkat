@@ -183,13 +183,10 @@ func showHelp(topic string) string {
 		use the '--multiline' flag at launch to read until a semi-colon character is encountered.
 
 		Any input that does not match one of the built-in commands is sent to the
-		remote server and the results are displayed.
+		remote server.
 
-		If ":>" is put at the beginning of input, everything after it will be sent to
-		the remote server regardless of whether it matches a built-in command. If a literal
-		":>" needs to be sent as the start of input to the remote server, as in
-		":>input to server", simply put a ":>" in front of it, like so:
-		":>:>input to server".`
+		If input must be sent that includes one of the built-in commands at the start,
+		the SEND command can be used to avoid pattern matching everything after it.`
 
 		suffixLines := misc.WrapText(suffix, helpWidth)
 		suffixLines = misc.JustifyTextBlock(suffixLines, helpWidth)
@@ -343,7 +340,7 @@ var commands = commandList{
 	},
 	"SEND": command{
 		helpInvoke: "bytes...",
-		helpDesc:   "Sends bytes. This command is assumed when no other command is given.",
+		helpDesc:   "Sends bytes. This command is assumed when no other command is given. It can be used to send literal bytes that would be otherwise interpreted as a command, such as `SEND LIST` to send the literal bytes that make up L, I, S, and T. It can also be used to explicitly instruct the console to perform a send of 0 bytes on the connection; whether this results in actual network traffic depends on the underlying driver.",
 		lineExec:   executeCommandSend,
 	},
 	"DEFINE": command{
@@ -392,13 +389,6 @@ var commands = commandList{
 	},
 }
 
-type userInput struct {
-	input        string
-	inputForHist string
-	promptErr    error
-	connErr      error
-}
-
 func init() {
 	// have to add this afterwards else we get into an initialization loop
 	commands["HELP"] = command{
@@ -426,25 +416,28 @@ func executeCommandClearhist(state *consoleState, args []string) (output string,
 	return output, nil
 }
 
-func autoComplete(language string, state *consoleState, line string) (candidates []string) {
+func completeCommand(partial string) (candidates []string) {
 	commandNames := commands.names()
 	for _, word := range commandNames {
-		if strings.HasPrefix(strings.ToLower(word), line) {
+		if strings.HasPrefix(strings.ToLower(word), partial) {
 			candidates = append(candidates, strings.ToLower(word))
 		}
-		if strings.HasPrefix(strings.ToUpper(word), line) {
+		if strings.HasPrefix(strings.ToUpper(word), partial) {
 			candidates = append(candidates, strings.ToUpper(word))
 		}
 	}
 	if len(candidates) == 0 {
 		for _, word := range commandNames {
-			if strings.HasPrefix(strings.ToUpper(word), strings.ToUpper(line)) {
+			if strings.HasPrefix(strings.ToUpper(word), strings.ToUpper(partial)) {
 				candidates = append(candidates, strings.ToUpper(word))
 			}
 		}
 	}
-
 	return candidates
+}
+
+func autoComplete(language string, state *consoleState, line string) (candidates []string) {
+	return completeCommand(line)
 }
 
 func stringifyResults(results interface{}) string {
@@ -464,31 +457,16 @@ func stringifyResults(results interface{}) string {
 	return fmt.Sprintf("%v", results)
 }
 
-func normalizeLine(line string) (result string, skipCommandMatching bool) {
+func normalizeLine(line string) (result string) {
 	cmd := strings.SplitN(line, "#", 2)[0]
 	cmd = strings.SplitN(cmd, "//", 2)[0]
 	cmd = strings.TrimFunc(cmd, unicode.IsSpace)
-
-	skipCommandMatching = false
-	if strings.HasPrefix(cmd, ":>") {
-		skipCommandMatching = true
-		cmd = strings.SplitN(cmd, ":>", 2)[1]
-		cmd = strings.TrimFunc(cmd, unicode.IsSpace)
-	}
-	return cmd, skipCommandMatching
+	return cmd
 }
 
-func isCompleteLine(state *consoleState, line string) bool {
-	cmd, skipCommandMatching := normalizeLine(line)
-
-	if !skipCommandMatching {
-		isCommand, _, _ := commands.parseCommand(cmd)
-		if isCommand {
-			return true
-		}
-	}
-
-	return strings.HasSuffix(cmd, ";")
+func isTerminatedStatement(state *consoleState, line string, terminator string) bool {
+	cmd := normalizeLine(line)
+	return strings.HasSuffix(cmd, terminator)
 }
 
 func parseLineToBytes(line string) (data []byte, err error) {
@@ -548,7 +526,7 @@ func executeLine(state *consoleState, line string) (cmdOutput string, err error)
 			state.out.Critical("Execution resulted in a fatal error; exiting and then dumping stack...")
 		}
 	}()
-	normalLine, skipCommandMatching := normalizeLine(line)
+	normalLine := normalizeLine(line)
 	if state.delimitWithSemicolon {
 		normalLine = strings.TrimSuffix(normalLine, ";")
 	}
@@ -559,14 +537,13 @@ func executeLine(state *consoleState, line string) (cmdOutput string, err error)
 		return "", nil
 	}
 
-	if !skipCommandMatching {
-		output, executed, err := commands.executeIfIsCommand(state, normalLine)
-		if executed {
-			exitExpected = true
-			return output, err
-		}
+	output, executed, err := commands.executeIfIsCommand(state, normalLine)
+	if executed {
+		exitExpected = true
+		return output, err
 	}
 
+	// otherwise, assume it is a send
 	_, err = executeCommandSend(state, "SEND "+normalLine, "SEND")
 	if err != nil {
 		exitExpected = true
@@ -759,12 +736,12 @@ func executeCommandMacroset(state *consoleState, argv []string) (output string, 
 	}
 
 	if swapToDefault {
-		if err := state.macros.SetCurrentSet(""); err != nil {
+		if err := state.macros.SetCurrentMacroset(""); err != nil {
 			return "", err
 		}
 		return state.out.InfoSprintf("Switched current macroset to the default one."), nil
 	} else if swapTo != "" {
-		if err := state.macros.SetCurrentSet(swapTo); err != nil {
+		if err := state.macros.SetCurrentMacroset(swapTo); err != nil {
 			return "", err
 		}
 		return state.out.InfoSprintf("Switched current macroset to %q.", swapTo), nil
@@ -773,7 +750,7 @@ func executeCommandMacroset(state *consoleState, argv []string) (output string, 
 	// and the last case, no args, user just wants to know the current one.
 	// do not mask behind verbosity as user specifically requested this and it should
 	// show even in the queitest of modes.
-	curSetName := state.macros.GetCurrentSet()
+	curSetName := state.macros.GetCurrentMacroset()
 	if curSetName == "" {
 		return "(default macroset)", nil
 	}
@@ -871,7 +848,7 @@ func executeCommandRename(state *consoleState, argv []string) (output string, er
 	// if user has not specified whether macro or set, need to do more work to decide
 	if !isSet && !isMacro {
 		isMacro = state.macros.IsDefined(firstName)
-		isSet = state.macros.SetIsDefined(firstName)
+		isSet = state.macros.IsDefinedMacroset(firstName)
 		if isMacro && isSet {
 			return "", fmt.Errorf("%q refers to both a macroset and to a macro in the current macroset; specify which with -s or -m", firstName)
 		}
@@ -982,7 +959,7 @@ func executeCommandExport(state *consoleState, argv []string) (output string, er
 		argv,
 		flagActions{
 			'c': func(i *int, argv []string) error {
-				includeSet[state.macros.GetCurrentSet()] = true
+				includeSet[state.macros.GetCurrentMacroset()] = true
 				return nil
 			},
 			's': func(i *int, argv []string) error {
@@ -1026,7 +1003,7 @@ func executeCommandExport(state *consoleState, argv []string) (output string, er
 		sort.Strings(includedMacrosets)
 
 		for _, macrosetName := range includedMacrosets {
-			if state.macros.SetIsDefined(macrosetName) {
+			if state.macros.IsDefinedMacroset(macrosetName) {
 				setCount, macroCount, err := state.macros.ExportSet(macrosetName, exportFile)
 				if err != nil {
 					return "", err
@@ -1086,12 +1063,12 @@ func ExecuteScript(f io.Reader, conn driver.Connection, out verbosity.OutputWrit
 	for scanner.Scan() {
 		lineNum++
 		partialCmd := scanner.Text()
-		normalPartial, _ := normalizeLine(partialCmd)
+		normalPartial := normalizeLine(partialCmd)
 		if normalPartial == "" {
 			continue
 		}
 		cmd += normalPartial
-		moreInputRequired = state.delimitWithSemicolon && !isCompleteLine(state, cmd)
+		moreInputRequired = state.delimitWithSemicolon && !isTerminatedStatement(state, cmd, ";")
 		if moreInputRequired {
 			cmd += "\n"
 		} else {
@@ -1276,14 +1253,14 @@ func promptUntilFullStatement(state *consoleState, prefix string) (inputWithNewl
 		} else if err != nil {
 			return "", "", err
 		}
-		normalPartial, _ := normalizeLine(partialCmd)
+		normalPartial := normalizeLine(partialCmd)
 		if normalPartial == "" {
 			continue
 		}
 		cmd += normalPartial
 		cmdWithSpaces += normalPartial
 
-		moreInputRequired = state.delimitWithSemicolon && !isCompleteLine(state, cmd)
+		moreInputRequired = state.delimitWithSemicolon && !isTerminatedStatement(state, cmd, ";")
 		if moreInputRequired {
 			cmd += "\n"
 			cmdWithSpaces += " "
