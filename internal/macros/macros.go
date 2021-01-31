@@ -132,9 +132,16 @@ func (set macroset) Apply(text string) (string, error) {
 	sort.Sort(sortableMacroList(allMacros))
 
 	workingText := text
+
+	// for each macro...
 	for _, name := range allMacros {
 		m := set.macros[strings.ToUpper(name)]
-		m.regex.FindAllString(workingText, 0)
+
+		// for each match of the macro found...
+		for idx, match := range m.regex.FindAllStringIndex(workingText, -1) {
+			newText := m.content
+
+		}
 	}
 	/*
 		A = B hello    // valid definition
