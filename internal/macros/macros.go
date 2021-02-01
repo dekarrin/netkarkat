@@ -81,83 +81,6 @@ func (set macroset) getMinLength() int {
 	return DefaultMinLength
 }
 
-type sortableMacroList []string
-
-func (a sortableMacroList) Len() int {
-	return len(a)
-}
-
-func (a sortableMacroList) Swap(i, j int) {
-	a[i], a[j] = a[j], a[i]
-}
-
-func (a sortableMacroList) Less(i, j int) bool {
-	// we want descending order, so "less" in terms of list order will actually be the one
-	// that is "more" in terms of content (length).
-
-	firstWordRuneCount := utf8.RuneCountInString(a[i])
-	secondWordRuneCount := utf8.RuneCountInString(a[j])
-	if firstWordRuneCount != secondWordRuneCount {
-		return firstWordRuneCount > secondWordRuneCount
-	}
-
-	// they are both equal in length, so give the one that comes last in the
-	// alphabet. comparison must be case-insensitive
-	return strings.ToUpper(a[i]) > strings.ToUpper(a[j])
-}
-
-// Apply does replacement of all applicable macros in the set to the given text.
-// If a loop is detected, the process aborts.
-//
-// Each macro is evaluated when encountered, and the macro in text is replaced
-// with the defined content. If the defined content contains further macros,
-// they will be evaluated first, and this process repeates recursively. If at
-// any point during a recursion a macro is encountered that has already been
-// encountered, it is considered a loop, and the replacement will immediately
-// terminate.
-func (set macroset) Apply(text string) (string, error) {
-	if set.macros == nil {
-		return text, nil
-	}
-	// we must go through in length order, descending.
-	// otherwise longer words would get obscured by them containing
-	// a macro inside of them (e.g. we need to evaluate a macro called
-	// "OrgTeam" before we evaluate a macro called "Org" or "Team".
-	//
-	// EDIT: the above will probably not apply since we are using a regex
-	// with \b at both ends to find the macros. Do the sort anyways because
-	// it is good defensive coding and it shouldn't have issues with
-	// runtime at any reasonable number of macros.
-	allMacros := set.GetAll()
-	sort.Sort(sortableMacroList(allMacros))
-
-	workingText := text
-
-	// for each macro...
-	for _, name := range allMacros {
-		m := set.macros[strings.ToUpper(name)]
-
-		// for each match of the macro found...
-		for idx, match := range m.regex.FindAllStringIndex(workingText, -1) {
-			newText := m.content
-
-		}
-	}
-	/*
-		A = B hello    // valid definition
-		B = A hello    // valid definition
-
-		using A:
-		"this is A result"
-		-> "this is B hello result"
-		pass 2
-		-> "this is A hello hello result"
-
-		for each replacement: fully run through it and see if we get a macro
-		already encountered. if we do, that is a fucking problem.
-	*/
-}
-
 // Sets the name of the macroset
 func (set *macroset) SetName(name string) error {
 	if err := validateName(name, "macroset", set.getMinLength()); err != nil {
@@ -314,7 +237,19 @@ func (set *macroset) Define(name string, content string) error {
 	if set.macros == nil {
 		set.macros = make(map[string]macro)
 	}
+	var oldMacro *macro
+	if set.IsDefined(name) {
+		oldMacro = new(macro)
+		*oldMacro = set.macros[strings.ToUpper(name)]
+	}
 	set.macros[strings.ToUpper(name)] = newMacro
+	if set.causesLoop(name) {
+		delete(set.macros, strings.ToUpper(name))
+		if oldMacro != nil {
+			set.macros[strings.ToUpper(name)] = *oldMacro
+		}
+		return fmt.Errorf("definition causes a loop")
+	}
 	return nil
 }
 

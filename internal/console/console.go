@@ -469,7 +469,12 @@ func isTerminatedStatement(state *consoleState, line string, terminator string) 
 	return strings.HasSuffix(cmd, terminator)
 }
 
-func parseLineToBytes(line string) (data []byte, err error) {
+func (state consoleState) parseLineToBytes(line string) (data []byte, err error) {
+	// first, preprocess by doing macro replacement
+	line, err = state.macros.Apply(line)
+	if err != nil {
+		return nil, err
+	}
 
 	runes := []rune(line)
 
@@ -561,7 +566,7 @@ func executeCommandSend(state *consoleState, line string, cmdName string) (outpu
 			state.out.Trace("being told to send empty string; skipping line parse")
 		} else {
 			linePastCommand := strings.TrimSpace(line[firstSpace:])
-			data, err = parseLineToBytes(linePastCommand)
+			data, err = state.parseLineToBytes(linePastCommand)
 			if err != nil {
 				return "", err
 			}

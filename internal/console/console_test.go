@@ -26,7 +26,8 @@ func Test_parseLineToBytes(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run("parseLineToBytes input "+tc.input, func(t *testing.T) {
 
-			actual, err := parseLineToBytes(tc.input)
+			sut := consoleState{}
+			actual, err := sut.parseLineToBytes(tc.input)
 
 			// check for error
 			if err != nil && !tc.expectErr {
