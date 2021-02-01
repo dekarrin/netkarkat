@@ -208,7 +208,7 @@ func main() {
 	}
 
 	if interactiveMode {
-		promptErr = console.StartPrompt(conn, out, currentVersion, *protocolFlag, *multilineModeFlag, !*noPromptFlag, *macrofileFlag)
+		promptErr = console.StartPrompt(conn, out, currentVersion, *multilineModeFlag, !*noPromptFlag, *macrofileFlag)
 		if promptErr != nil {
 			if lastConnectionError == io.EOF {
 				// it will not have been printed yet bc of our error handler given to the connection, we need to do that now
