@@ -149,6 +149,19 @@ func CollapseWhitespace(s string) (collapsed string) {
 	return sb.String()
 }
 
+// RepeatText repeats the given text the specified number of times.
+// If rep is 0 or less, the empty string is returned.
+func RepeatText(s string, rep int) string {
+	if rep < 1 {
+		return ""
+	}
+	var sb strings.Builder
+	for i := 0; i < rep; i++ {
+		sb.WriteString(s)
+	}
+	return sb.String()
+}
+
 func appendWordToLine(lines []string, curWord []rune, curLine []rune, width int) (newLines []string, newCurLine []rune) {
 	//originalWord := string(curWord)
 	for len(curWord) > 0 {

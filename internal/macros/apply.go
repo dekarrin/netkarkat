@@ -47,7 +47,7 @@ func (set macroset) Apply(text string) (string, error) {
 	var stack stack.StringStack
 	stack.Normalize = strings.ToUpper
 
-	replaced, err := set.executeMacros(text, &stack)
+	replaced, err := set.executeMacros(text, &stack, 0)
 	if err != nil {
 		return "", err
 	}
@@ -71,13 +71,13 @@ func (mc MacroCollection) Apply(text string) (replaced string, err error) {
 func (set macroset) causesLoop(macro string) bool {
 	if set.IsDefined(macro) {
 		stack := stack.StringStack{Normalize: strings.ToUpper}
-		_, err := set.executeMacros(strings.ToUpper(macro), &stack)
+		_, err := set.executeMacros(strings.ToUpper(macro), &stack, 0)
 		return err != nil
 	}
 	return false
 }
 
-func (set macroset) executeMacros(text string, macrosUsed *stack.StringStack) (parsed string, err error) {
+func (set macroset) executeMacros(text string, macrosUsed *stack.StringStack, level int) (parsed string, err error) {
 	allMacros := set.GetAll()
 
 	// we must go through in length order, descending.
@@ -92,7 +92,6 @@ func (set macroset) executeMacros(text string, macrosUsed *stack.StringStack) (p
 	sort.Sort(sortableMacroList(allMacros))
 
 	workingText := text
-
 	// for each macro...
 	for _, name := range allMacros {
 		m := set.macros[strings.ToUpper(name)]
@@ -107,7 +106,7 @@ func (set macroset) executeMacros(text string, macrosUsed *stack.StringStack) (p
 		}
 
 		macrosUsed.Push(name)
-		replacement, err := set.executeMacros(m.content, macrosUsed)
+		replacement, err := set.executeMacros(m.content, macrosUsed, level+1)
 		if err != nil {
 			return "", err
 		}
@@ -118,12 +117,12 @@ func (set macroset) executeMacros(text string, macrosUsed *stack.StringStack) (p
 		for idx, match := range matches {
 			mStart, mEnd = match[0], match[1]
 
-			beforeEnd = int(math.Max(0, float64(mStart)-1))
+			beforeEnd = mStart
 			afterEnd = len(workingText)
 			if idx+1 < len(matches) {
 				afterEnd = matches[idx+1][0]
 			}
-			afterStart = int(math.Min(float64(afterEnd), float64(mEnd)+1))
+			afterStart = int(math.Min(float64(afterEnd), float64(mEnd)))
 
 			sb.WriteString(workingText[beforeStart:beforeEnd])
 			sb.WriteString(replacement)

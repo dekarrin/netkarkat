@@ -1186,7 +1186,7 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 
 		cmdOutput, err := executeLine(&state, cmd)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			if state.connection.IsClosed() {
 				state.running = false
 			}
