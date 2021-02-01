@@ -4,6 +4,20 @@ mode.
 
 It was created because sometimes, pure netcat just ain't good enough.
 
+## Installation
+
+First, download one of the releases from the release section. Then, extract it.
+
+```bash
+$ tar xzf netkk-latest-amd64-windows.tar.gz
+```
+
+### *Nix
+Take the executable file `netkk` inside and copy it somewhere on your `$PATH`.
+
+### Windows
+For Windows, take the executable file `netkkcmd.exe` and the launch file `netkk.bat` and place them in the same directory somewhere on your path.
+
 ## Basic Usage
 To open a UDP connection and begin communicating with a remote host:
 

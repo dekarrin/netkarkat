@@ -88,7 +88,7 @@ do
   dist_bin_name="$BINARY_NAME"
   if [ "$current_os" = "windows" ]
   then
-    dist_bin_name="$BINARY_NAME.exe"
+    dist_bin_name="${BINARY_NAME}cmd.exe"
   fi
 
   go clean
@@ -101,6 +101,10 @@ do
   rm -rf "$distfolder" "$dist_latest_name.tar.gz" "$dist_versioned_name.tar.gz"
   mkdir "$distfolder"
   cp README.md CHANGELOG source.tar.gz "$distfolder/"
+  if [ "$current_os" = "windows" ]
+  then
+    cp netkk.bat "$distfolder"
+  fi
   
   if [ "$current_os" != "windows" ]
   then
