@@ -3,6 +3,7 @@ package console
 import (
 	"bufio"
 	"bytes"
+	"encoding/gob"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -200,18 +201,17 @@ func showHelp(topic string) string {
 }
 
 type consoleState struct {
-	language             string
-	connection           driver.Connection
-	running              bool         // only valid if in interactive mode
-	prompt               *liner.State // only valid if in interactive mode
-	usingHistFile        bool         // only valid if in interactive mode
-	version              string
-	out                  verbosity.OutputWriter
-	interactive          bool
-	delimitWithSemicolon bool
-	macrofile            string
-	usingMacrosFile      bool
-	macros               macros.MacroCollection
+	language                  string
+	connection                driver.Connection
+	running                   bool         // only valid if in interactive mode
+	prompt                    *liner.State // only valid if in interactive mode
+	usingUserPersistenceFiles bool         // only valid if in interactive mode
+	version                   string
+	out                       verbosity.OutputWriter
+	interactive               bool
+	delimitWithSemicolon      bool
+	macrofile                 string
+	macros                    macros.MacroCollection
 }
 
 type command struct {
@@ -412,9 +412,7 @@ func executeCommandClearhist(state *consoleState, args []string) (output string,
 		return "", fmt.Errorf("%s command only available in interactive mode", args[0])
 	}
 	state.prompt.ClearHistory()
-	if state.usingHistFile {
-		state.usingHistFile = writeHistFile(state.prompt, state.out, "nkk")
-	}
+	state.writeHistFile()
 	output = state.out.InfoSprintf("Command history has been cleared")
 	return output, nil
 }
@@ -649,8 +647,8 @@ func executeCommandDefine(state *consoleState, line string, cmdName string) (str
 	if err := state.macros.Define(macroName, strings.Join(parts[2:], " ")); err != nil {
 		return "", err
 	}
-	if state.usingMacrosFile {
-		state.usingMacrosFile = writeMacrosFile(state)
+	if state.usingUserPersistenceFiles {
+		state.writeMacrosFile()
 	}
 	if alreadyExists {
 		return state.out.InfoSprintf("Updated %q to new contents", macroName), nil
@@ -685,6 +683,9 @@ func executeCommandUndefine(state *consoleState, argv []string) (output string, 
 
 	// if the current macroset doesn't yet exist, there's nothing to not define.
 	if state.macros.Undefine(macroName, doReplacement) {
+		if state.usingUserPersistenceFiles {
+			state.writeMacrosFile()
+		}
 		return state.out.InfoSprintf("Deleted macro %q", macroName), nil
 	}
 	return state.out.InfoSprintf("%q is not currently a defined macro, so not doing anything", argv[1]), nil
@@ -909,6 +910,10 @@ func executeCommandRename(state *consoleState, argv []string) (output string, er
 		if err != nil {
 			return "", err
 		}
+
+		if state.usingUserPersistenceFiles {
+			state.writeMacrosFile()
+		}
 		return state.out.InfoSprintf("Saved the current default set to new name %q", firstName), nil
 	}
 
@@ -942,6 +947,9 @@ func executeCommandRename(state *consoleState, argv []string) (output string, er
 		msg := "Renamed macro %q to %q"
 		if doReplacement {
 			msg += " and updated all usages in other macros to match"
+		}
+		if state.usingUserPersistenceFiles {
+			state.writeMacrosFile()
 		}
 		return state.out.InfoSprintf(msg, firstName, secondName), nil
 	}
@@ -1012,6 +1020,10 @@ func executeCommandImport(state *consoleState, argv []string) (output string, er
 	}
 	if macroCount == 1 {
 		macroS = ""
+	}
+
+	if state.usingUserPersistenceFiles {
+		state.writeMacrosFile()
 	}
 
 	return state.out.InfoSprintf(successFmt, macroCount, macroS, setCount, setS), nil
@@ -1244,9 +1256,7 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 		}
 
 		state.prompt.AppendHistory(histCmd)
-		if state.usingHistFile {
-			state.usingHistFile = writeHistFile(state.prompt, state.out, state.language)
-		}
+		state.writeHistFile()
 
 		cmdOutput, err := executeLine(&state, cmd)
 		if err != nil {
@@ -1270,8 +1280,7 @@ func (state *consoleState) setupConsoleLiner(language string) {
 	state.prompt.SetCompleter(func(line string) []string {
 		return autoComplete(language, state, line)
 	})
-	state.usingHistFile = loadHistFile(state.prompt, state.out, state.language)
-	state.usingMacrosFile = state.usingHistFile
+	state.loadPersistenceFiles()
 }
 
 func promptUntilFullStatement(state *consoleState, prefix string) (inputWithNewlines string, inputWithSpaces string, err error) {
@@ -1365,143 +1374,149 @@ func suspendHistory(prompt *liner.State) (*bytes.Buffer, error) {
 }
 
 func (state *consoleState) loadMacrosFile() {
-
-	var macrosPath string
-	var filename string
-	if state.macrofile != "" {
-		filename = filepath.Base(state.macrofile)
-		macrosPath = state.macrofile
-	} else {
-		filename = "macros.m"
-		homedir, err := os.UserHomeDir()
-		if err != nil {
-			state.out.Warn("couldn't get homedir; macros history will be limited to this session: %v\n", err)
-			state.usingMacrosFile = false
-			return
-		}
-		appDir := filepath.Join(homedir, ".netkk")
-		err = os.Mkdir(appDir, os.ModeDir|0755)
-		if err != nil && !os.IsExist(err) {
-			state.out.Warn("couldn't create ~/.netkk; macros history will be limited to this session: %v\n", err)
-			state.usingMacrosFile = false
-			return
-		}
-		macrosPath = filepath.Join(appDir, filename)
-	}
-	f, err := os.Open(macrosPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			state.usingMacrosFile = true
-			return
-		}
-		state.out.Warn("couldn't open ~/.netkk/%s; macros history will be limited to this session: %v\n", filename, err)
-		state.usingMacrosFile = false
+	if !state.usingUserPersistenceFiles {
 		return
+	}
+	f, err := openPersistenceFile(state.macrofile, "macros.m")
+	if err != nil && !os.IsNotExist(err) {
+		state.out.Warn("%v", err)
+		state.usingUserPersistenceFiles = false
 	}
 	defer f.Close()
 	state.macros.Clear()
-	state.macros.Import(f)
+	_, _, err = state.macros.Import(f)
 	if err != nil {
 		state.out.Warn("couldn't read macros file: %v\n", err)
 	}
-	state.usingMacrosFile = true
-	return
 }
 
-func loadHistFile(prompt *liner.State, out verbosity.OutputWriter, language string) bool {
-	var histPath string
-	homedir, err := os.UserHomeDir()
-	if err != nil {
-		out.Warn("couldn't get homedir; command history will be limited to this session: %v\n", err)
-		return false
+func (state *consoleState) loadHistFile() {
+	if !state.usingUserPersistenceFiles {
+		return
 	}
-	appDir := filepath.Join(homedir, ".netkk")
-	err = os.Mkdir(appDir, os.ModeDir|0755)
-	if err != nil && !os.IsExist(err) {
-		out.Warn("couldn't create ~/.netkk; command history will be limited to this session: %v\n", err)
-		return false
-	}
-
-	filename := fmt.Sprintf("history-%s", strings.ToLower(language))
-	histPath = filepath.Join(appDir, filename)
-	f, err := os.Open(histPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true
-		}
-		out.Warn("couldn't open ~/.netkk/%s; command history will be limited to this session: %v\n", filename, err)
-		return false
+	f, err := openPersistenceFile("", "history-nkk")
+	if err != nil && !os.IsNotExist(err) {
+		state.out.Warn("%v", err)
+		state.usingUserPersistenceFiles = false
 	}
 	defer f.Close()
-	_, err = prompt.ReadHistory(f)
+	_, err = state.prompt.ReadHistory(f)
 	if err != nil {
-		out.Warn("couldn't read history file: %v\n", err)
+		state.out.Warn("couldn't read history file: %v\n", err)
 	}
-	return true
 }
 
-func writeHistFile(prompt *liner.State, out verbosity.OutputWriter, language string) bool {
-	var histPath string
-	homedir, err := os.UserHomeDir()
+func (state *consoleState) writeMacrosFile() {
+	if !state.usingUserPersistenceFiles {
+		return
+	}
+	f, err := createPersistenceFile(state.macrofile, "macros.m")
 	if err != nil {
-		out.Warn("couldn't get homedir; command history will be limited to this session: %v\n", err)
-		return false
-	}
-	appDir := filepath.Join(homedir, ".netkk")
-	err = os.Mkdir(appDir, os.ModeDir|0755)
-	if err != nil && !os.IsExist(err) {
-		out.Warn("couldn't create ~/.netkk; command history will be limited to this session: %v\n", err)
-		return false
-	}
-	filename := fmt.Sprintf("history-%s", strings.ToLower(language))
-	histPath = filepath.Join(appDir, filename)
-	f, err := os.Create(histPath)
-	if err != nil {
-		out.Warn("couldn't open ~/.netkk/%s; command history will be limited to this session: %v\n", filename, err)
-		return false
-	}
-	defer f.Close()
-	_, err = prompt.WriteHistory(f)
-	if err != nil {
-		out.Warn("couldn't write history file: %v\n", err)
-		return false
-	}
-	return true
-}
-
-func writeMacrosFile(state *consoleState) bool {
-	var macrosPath string
-	var filename string
-	if state.macrofile != "" {
-		filename = filepath.Base(state.macrofile)
-		macrosPath = state.macrofile
-	} else {
-		filename = "macros.m"
-		homedir, err := os.UserHomeDir()
-		if err != nil {
-			state.out.Warn("couldn't get homedir; macros will be limited to this session: %v\n", err)
-			return false
-		}
-		appDir := filepath.Join(homedir, ".netkk")
-		err = os.Mkdir(appDir, os.ModeDir|0755)
-		if err != nil && !os.IsExist(err) {
-			state.out.Warn("couldn't create ~/.netkk; macros will be limited to this session: %v\n", err)
-			return false
-		}
-		macrosPath = filepath.Join(appDir, filename)
-	}
-	f, err := os.Create(macrosPath)
-	if err != nil {
-		state.out.Warn("couldn't open ~/.netkk/%s; macros will be limited to this session: %v\n", filename, err)
-		return false
+		state.out.Warn("%v", err)
+		state.usingUserPersistenceFiles = false
 	}
 	defer f.Close()
 	_, _, err = state.macros.Export(f)
 	if err != nil {
 		state.out.Warn("couldn't write macros file: %v\n", err)
-		return false
+		state.usingUserPersistenceFiles = false
 	}
-	return true
+}
+
+func (state *consoleState) writeHistFile() {
+	if !state.usingUserPersistenceFiles {
+		return
+	}
+	f, err := createPersistenceFile("", "history-nkk")
+	if err != nil {
+		state.out.Warn("%v", err)
+		state.usingUserPersistenceFiles = false
+	}
+	defer f.Close()
+	_, err = state.prompt.WriteHistory(f)
+	if err != nil {
+		state.out.Warn("couldn't write history file: %v\n", err)
+		state.usingUserPersistenceFiles = false
+	}
+}
+
+func (state *consoleState) loadStateFile() {
+	if !state.usingUserPersistenceFiles {
+		return
+	}
+	f, err := openPersistenceFile("", "state")
+	if err != nil {
+		state.out.Warn("%v", err)
+		state.usingUserPersistenceFiles = false
+	}
+	defer f.Close()
+
+	dec := gob.NewDecoder(bufio.NewReader(f))
+	var curSet string
+	if err := dec.Decode(&curSet); err != nil {
+		state.out.Warn("couldn't read state file: %v\v", err)
+	}
+	state.macros.SetCurrentMacroset(curSet)
+}
+
+func (state *consoleState) writeStateFile() {
+	if !state.usingUserPersistenceFiles {
+		return
+	}
+	f, err := createPersistenceFile("", "state")
+	if err != nil {
+		state.out.Warn("%v", err)
+		state.usingUserPersistenceFiles = false
+	}
+	defer f.Close()
+
+	enc := gob.NewEncoder(bufio.NewWriter(f))
+	if err := enc.Encode(state.macros.GetCurrentMacroset()); err != nil {
+		state.out.Warn("couldn't write state file: %v\v", err)
+	}
+}
+
+func createPersistenceFile(userSupplied, defaultIfNone string) (*os.File, error) {
+	fullPath, err := getPersistencePath(userSupplied, defaultIfNone)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Create(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't open ~/.netkk/%s; persistence will be limited to this session: %v", filepath.Base(fullPath), err)
+	}
+	return f, nil
+}
+
+func openPersistenceFile(userSupplied, defaultIfNone string) (*os.File, error) {
+	fullPath, err := getPersistencePath(userSupplied, defaultIfNone)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't open ~/.netkk/%s; persistence will be limited to this session: %v", filepath.Base(fullPath), err)
+	}
+	return f, nil
+}
+
+func getPersistencePath(userSupplied, defaultIfNone string) (string, error) {
+	var fullPath string
+	if userSupplied != "" {
+		fullPath = userSupplied
+	} else {
+		homedir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("couldn't get homedir; persistence will be limited to this session: %v", err)
+		}
+		appDir := filepath.Join(homedir, ".netkk")
+		err = os.Mkdir(appDir, os.ModeDir|0755)
+		if err != nil && !os.IsExist(err) {
+			return "", fmt.Errorf("couldn't create ~/.netkk; persistence will be limited to this session: %v", err)
+		}
+		fullPath = filepath.Join(appDir, defaultIfNone)
+	}
+	return fullPath, nil
 }
 
 func getSplashTextArt() []string {
@@ -1551,4 +1566,10 @@ func isErrCloseDuringPrompt(err error) bool {
 		return ok
 	}
 	return false
+}
+
+func (state *consoleState) loadPersistenceFiles() {
+	state.loadHistFile()
+	state.loadMacrosFile()
+	state.loadStateFile()
 }
