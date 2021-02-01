@@ -9,10 +9,10 @@ It was created because sometimes, pure netcat just ain't good enough.
 First, download one of the releases from the release section. Then, extract it.
 
 ```bash
-$ tar xzf netkk-latest-amd64-windows.tar.gz
+$ tar xzf netkk-latest-amd64-linux.tar.gz
 ```
 
-### *Nix
+### *Nix (Mac, Linux, etc)
 Take the executable file `netkk` inside and copy it somewhere on your `$PATH`.
 
 ### Windows
@@ -106,3 +106,12 @@ would communicate with netkarkat to put that CA in their pool of trusted CAs.
 Failure to specify the CA in the client program's trust pool is likely to make
 the client program fail to validate the generated certificate.
 
+If a generated cert is used, some aspects can be changed. The common name can be
+specified with `--cert-common-name`, and the IP addresses can be set with
+`--cert-ips`.
+
+```
+netkk -l 8335 --ssl --cert-common-name netkkHost.local.network
+
+netkk -l 8335 --ssl --cert-ips 127.0.0.1,10.140.12.233
+```

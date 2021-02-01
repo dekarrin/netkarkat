@@ -209,6 +209,8 @@ type consoleState struct {
 	out                  verbosity.OutputWriter
 	interactive          bool
 	delimitWithSemicolon bool
+	macrofile            string
+	usingMacrosFile      bool
 	macros               macros.MacroCollection
 }
 
@@ -646,6 +648,9 @@ func executeCommandDefine(state *consoleState, line string, cmdName string) (str
 	alreadyExists := state.macros.IsDefined(macroName)
 	if err := state.macros.Define(macroName, strings.Join(parts[2:], " ")); err != nil {
 		return "", err
+	}
+	if state.usingMacrosFile {
+		state.usingMacrosFile = writeMacrosFile(state)
 	}
 	if alreadyExists {
 		return state.out.InfoSprintf("Updated %q to new contents", macroName), nil
@@ -1114,8 +1119,9 @@ func executeCommandExport(state *consoleState, argv []string) (output string, er
 // Everything after a "#" or a "//" is ignored.
 // If the provided line is empty after removing comments and trimming, no action is taken and the empty string
 // is returned.
-func ExecuteScript(f io.Reader, conn driver.Connection, out verbosity.OutputWriter, version string, delimitWithSemicolon bool) (lines int, err error) {
-	state := &consoleState{connection: conn, version: version, out: out, interactive: false, delimitWithSemicolon: delimitWithSemicolon}
+func ExecuteScript(f io.Reader, conn driver.Connection, out verbosity.OutputWriter, version string, delimitWithSemicolon bool, macrofile string) (lines int, err error) {
+	state := &consoleState{connection: conn, version: version, out: out, interactive: false, delimitWithSemicolon: delimitWithSemicolon, macrofile: macrofile}
+	state.loadMacrosFile()
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
 	numLinesRead := 0
@@ -1161,7 +1167,7 @@ func ExecuteScript(f io.Reader, conn driver.Connection, out verbosity.OutputWrit
 }
 
 // StartPrompt makes a prompt and starts it
-func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool, showPromptText bool) (err error) {
+func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version string, language string, delimitWithSemicolon bool, showPromptText bool, macrofile string) (err error) {
 
 	state := consoleState{
 		running:              true,
@@ -1171,6 +1177,7 @@ func StartPrompt(conn driver.Connection, out verbosity.OutputWriter, version str
 		interactive:          true,
 		language:             language,
 		delimitWithSemicolon: delimitWithSemicolon,
+		macrofile:            macrofile,
 	}
 
 	// sleep until ready
@@ -1264,6 +1271,7 @@ func (state *consoleState) setupConsoleLiner(language string) {
 		return autoComplete(language, state, line)
 	})
 	state.usingHistFile = loadHistFile(state.prompt, state.out, state.language)
+	state.usingMacrosFile = state.usingHistFile
 }
 
 func promptUntilFullStatement(state *consoleState, prefix string) (inputWithNewlines string, inputWithSpaces string, err error) {
@@ -1356,6 +1364,50 @@ func suspendHistory(prompt *liner.State) (*bytes.Buffer, error) {
 	return buf, nil
 }
 
+func (state *consoleState) loadMacrosFile() {
+
+	var macrosPath string
+	var filename string
+	if state.macrofile != "" {
+		filename = filepath.Base(state.macrofile)
+		macrosPath = state.macrofile
+	} else {
+		filename = "macros.m"
+		homedir, err := os.UserHomeDir()
+		if err != nil {
+			state.out.Warn("couldn't get homedir; macros history will be limited to this session: %v\n", err)
+			state.usingMacrosFile = false
+			return
+		}
+		appDir := filepath.Join(homedir, ".netkk")
+		err = os.Mkdir(appDir, os.ModeDir|0755)
+		if err != nil && !os.IsExist(err) {
+			state.out.Warn("couldn't create ~/.netkk; macros history will be limited to this session: %v\n", err)
+			state.usingMacrosFile = false
+			return
+		}
+		macrosPath = filepath.Join(appDir, filename)
+	}
+	f, err := os.Open(macrosPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			state.usingMacrosFile = true
+			return
+		}
+		state.out.Warn("couldn't open ~/.netkk/%s; macros history will be limited to this session: %v\n", filename, err)
+		state.usingMacrosFile = false
+		return
+	}
+	defer f.Close()
+	state.macros.Clear()
+	state.macros.Import(f)
+	if err != nil {
+		state.out.Warn("couldn't read macros file: %v\n", err)
+	}
+	state.usingMacrosFile = true
+	return
+}
+
 func loadHistFile(prompt *liner.State, out verbosity.OutputWriter, language string) bool {
 	var histPath string
 	homedir, err := os.UserHomeDir()
@@ -1417,6 +1469,41 @@ func writeHistFile(prompt *liner.State, out verbosity.OutputWriter, language str
 	return true
 }
 
+func writeMacrosFile(state *consoleState) bool {
+	var macrosPath string
+	var filename string
+	if state.macrofile != "" {
+		filename = filepath.Base(state.macrofile)
+		macrosPath = state.macrofile
+	} else {
+		filename = "macros.m"
+		homedir, err := os.UserHomeDir()
+		if err != nil {
+			state.out.Warn("couldn't get homedir; macros will be limited to this session: %v\n", err)
+			return false
+		}
+		appDir := filepath.Join(homedir, ".netkk")
+		err = os.Mkdir(appDir, os.ModeDir|0755)
+		if err != nil && !os.IsExist(err) {
+			state.out.Warn("couldn't create ~/.netkk; macros will be limited to this session: %v\n", err)
+			return false
+		}
+		macrosPath = filepath.Join(appDir, filename)
+	}
+	f, err := os.Create(macrosPath)
+	if err != nil {
+		state.out.Warn("couldn't open ~/.netkk/%s; macros will be limited to this session: %v\n", filename, err)
+		return false
+	}
+	defer f.Close()
+	_, _, err = state.macros.Export(f)
+	if err != nil {
+		state.out.Warn("couldn't write macros file: %v\n", err)
+		return false
+	}
+	return true
+}
+
 func getSplashTextArt() []string {
 	return []string{
 		"-- netkkUser [NU] began pestering netKarkat [CG] at 04:13 --",
@@ -1436,6 +1523,7 @@ func getSplashTextArt() []string {
 		"        \\    -vVVVVv-  .'",
 		"         `._       _.-´",
 		"            `----´´",
+		"",
 	}
 }
 

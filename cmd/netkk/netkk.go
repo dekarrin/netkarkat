@@ -64,6 +64,7 @@ func main() {
 	multilineModeFlag := kingpin.Flag("multiline", "Do not send input when enter is pressed; continuing reading input until a semicolon is encountered.").Short('M').Bool()
 	quietFlag := kingpin.Flag("quiet", "Silence all output except for server results. Overrides verbose mode.").Short('q').Bool()
 	useTLSFlag := kingpin.Flag("tls", "Enable SSL/TLS for the connection.").Bool()
+	macrofileFlag := kingpin.Flag("macrofile", "File to load for macros instead of the default one. Will also be where they are saved to.").Short('m').ExistingFile()
 	skipVerifyFlag := kingpin.Flag("insecure-skip-verify", "Do not verify remote host server certificates when using SSL/TLS.").Bool()
 	trustChainFileFlag := kingpin.Flag("trustchain", "File to use to verify remote host server certificates when using SSL/TLS.").ExistingFile()
 	serverCertFileFlag := kingpin.Flag("server-cert", "PEM cert file to use for encrypting SSL/TLS connections as a TCP server.").ExistingFile()
@@ -207,7 +208,7 @@ func main() {
 	}
 
 	if interactiveMode {
-		promptErr = console.StartPrompt(conn, out, currentVersion, *protocolFlag, *multilineModeFlag, !*noPromptFlag)
+		promptErr = console.StartPrompt(conn, out, currentVersion, *protocolFlag, *multilineModeFlag, !*noPromptFlag, *macrofileFlag)
 		if promptErr != nil {
 			if lastConnectionError == io.EOF {
 				// it will not have been printed yet bc of our error handler given to the connection, we need to do that now
@@ -224,7 +225,7 @@ func main() {
 	} else {
 		// we have scripts or commands to execute
 		for idx, cmdArg := range *commandFlag {
-			_, err := console.ExecuteScript(strings.NewReader(cmdArg), conn, out, currentVersion, *multilineModeFlag)
+			_, err := console.ExecuteScript(strings.NewReader(cmdArg), conn, out, currentVersion, *multilineModeFlag, *macrofileFlag)
 			if err != nil {
 				handleFatalErrorWithStatusCode(fmt.Errorf("command #%d: %v", idx+1, err), ExitStatusScriptCommandError)
 				return
@@ -237,7 +238,7 @@ func main() {
 			}
 			defer f.Close()
 
-			lines, err := console.ExecuteScript(f, conn, out, currentVersion, !*multilineModeFlag)
+			lines, err := console.ExecuteScript(f, conn, out, currentVersion, !*multilineModeFlag, *macrofileFlag)
 			if err != nil {
 				handleFatalErrorWithStatusCode(fmt.Errorf("%q:%d: %v", filename, lines+1, err), ExitStatusScriptCommandError)
 				return
