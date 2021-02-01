@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -437,7 +438,63 @@ func completeCommand(partial string) (candidates []string) {
 }
 
 func autoComplete(language string, state *consoleState, line string) (candidates []string) {
-	return completeCommand(line)
+	candidates = completeFilename(line)
+	if candidates != nil {
+		return candidates
+	}
+	candidates = completeCommand(line)
+	macroCandidates := state.completeMacros(line)
+	if macroCandidates != nil {
+		candidates = append(candidates, macroCandidates...)
+	}
+	return candidates
+}
+
+func (state *consoleState) completeMacros(line string) []string {
+	parts, err := shlex.Split(line)
+	if err != nil {
+		return nil
+	}
+	if len(parts) < 1 {
+		return nil
+	}
+
+	var candidates []string
+	for _, n := range state.macros.GetNames() {
+		if strings.HasPrefix(n, parts[len(parts)-1]) {
+			if len(parts) == 1 {
+				candidates = append(candidates, n)
+			} else {
+				candidates = append(candidates, strings.Join(parts[:len(parts)-1], " ")+" "+n)
+			}
+		}
+	}
+	return candidates
+}
+
+func completeFilename(line string) []string {
+	var candidates []string
+	// check for import/export, do filesystem completions in that case
+	parts, err := shlex.Split(line)
+	if err == nil {
+		if len(parts) == 2 {
+			if strings.ToUpper(parts[0]) == "IMPORT" || strings.ToUpper(parts[0]) == "EXPORT" {
+				// okay we're on the second item, try to do a filesystem completion.
+				path := parts[1]
+				fsDir := filepath.Dir(path)
+				files, err := ioutil.ReadDir(fsDir)
+				if err != nil {
+					return nil
+				}
+				for _, fs := range files {
+					if !fs.IsDir() && strings.HasPrefix(fs.Name(), parts[1]) {
+						candidates = append(candidates, parts[0]+" "+fs.Name())
+					}
+				}
+			}
+		}
+	}
+	return candidates
 }
 
 func stringifyResults(results interface{}) string {
@@ -1362,10 +1419,23 @@ func writeHistFile(prompt *liner.State, out verbosity.OutputWriter, language str
 
 func getSplashTextArt() []string {
 	return []string{
-		"   _______________________   ",
-		"  /                       \\  ",
-		" |    NETKARKAT, HUMAN!   | ",
-		"  \\_______________________/  ",
+		"-- netkkUser [NU] began pestering netKarkat [CG] at 04:13 --",
+		"",
+		"                  _.-,",
+		"         A    _.-´  /",
+		"       .´ \\--´     /_____",
+		"     ,´                  |__.-´",
+		"    / ,._                ,-,_/",
+		"   (  \\__)               \\/ \\",
+		"  ,-      _     ,      _     \\_",
+		".´       \\ \\_  | v\\  _/ \\    .´",
+		" `.    ´\\/   \\ /   |/    |.-´",
+		"   `.  \\      V    v     |",
+		"     \\__\\ <_O_>    <_o_> |",
+		"       \\    -´      `-   '",
+		"        \\    -vVVVVv-  .'",
+		"         `._       _.-´",
+		"            `----´´",
 	}
 }
 
