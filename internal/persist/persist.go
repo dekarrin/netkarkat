@@ -16,7 +16,17 @@
 // may be a fully-qualified path on the file system as opposed to relative to the initial
 // directory; for others, this may be a different meaning.
 //
+// All IO itself is buffered unless Synchronous is passed to the OpenDocument function;
+// in that case all IO will be directly to the file. This is likely to be extremely slow.
+//
 // Concurrent usage is not currently safe.
+//
+//
+//
+// currently package might seen v silly since all we have is "directory, with files",
+// but that may change in the future.
+//
+// (probs yagni but fuck it this is my house and my house shall be tidy)
 package persist
 
 import (
@@ -27,57 +37,35 @@ import (
 	"path/filepath"
 )
 
-// AllowedOperations is a number that specifies which operations
-// are allowed on a Document.
-type AllowedOperations int
-
-const (
-	// ReadOnly indicates that only reading is allowed on the Document.
-	ReadOnly AllowedOperations = iota
-	// WriteOnly indicates that only writing is allowed on the Document.
-	WriteOnly
-	// ReadAndWrite indicates that both writing and reading is allowed on the Document.
-	ReadAndWrite
-)
-
-// DocumentMode is the mode to open a Document with.
-type DocumentMode struct {
-	// AllowedOperations is which types of operations are allowed in the document.
-	// This can be one of "ReadOnly", "WriteOnly", or "ReadAndWrite".
-	AllowedOperations AllowedOperations
-
-	// Append is whether writes append to the end of the Document. If this is set to
-	// true, all writes will be sent to the end of the Document regardless of the
-	// current seek position.
-	Append bool
-
-	// Create specifies that a new Document should be created if one does not already exist.
-	Create bool
-
-	// Exclusive is used with Create and specifies that there must not already be a
-	// Document that is being overwritten.
-	Exclusive   bool
-	Synchronous bool
-	Truncate    bool
-}
-
 // Store for all persistence documents. Each document has a key associated with it,
 // usually this is a path or a path-like string referring to the document. Note that
 // not all persistence is necessarily file-system based and depends on how the source
 // is implemented.
-//
 type Store interface {
-	OpenDocument(key, fqAltKey string, mode DocumentMode)
-}
 
-// source for persistence in case we want to change it up later
-//
-// currently might seen v silly since all we have is "directory, with files",
-// but that may change in the future.
-//
-// (probs yagni but fuck it this is my house and my house shall be tidy)
-type dirSource struct {
-	dirBased string
+	// Open opens a Document for reading. If successful, methods on
+	// the returned Document can be used for reading; it will have its mode set
+	// to BasicOpenMode, which specifies read-only.
+	//
+	// If fqAltKey is non-empty, it will be used as the key instead of key; in
+	// this case it must be a properly-formatted fully-qualified alternative key
+	// as specified by the implementor.
+	Open(key, fqAltKey string) (Document, error)
+
+	// OpenDocument is the generalized open call; most users will use Open or
+	// Create instead. If the Document does not exist, and mode.Create is set
+	// to true, the Document is created. If successful, methods on the returned
+	// Document can be used for I/O.
+	OpenDocument(key, fqAltKey string, mode DocumentMode) (Document, error)
+
+	// Create creates or truncates a Document. If the Document already exists,
+	// it is truncated. If the Document does not already exist, it is created.
+	// If successful, methods on the returned Document can be used for IO.
+	//
+	// If fqAltKey is non-empty, it will be used as the key instead of key; in
+	// this case it must be a properly-formatted fully-qualified alternative key
+	// as specified by the implementor.
+	Create(key, fqAltKey string) (Document, error)
 }
 
 func (state *consoleState) loadPersistenceFiles() {
@@ -172,23 +160,6 @@ func (state *consoleState) writeHistFile() {
 	}
 }
 
-func (state *consoleState) writeStateFile() {
-	if !state.usingUserPersistenceFiles {
-		return
-	}
-	f, err := createPersistenceFile("", "state")
-	if err != nil {
-		state.out.Warn("%v", err)
-		state.usingUserPersistenceFiles = false
-	}
-	defer f.Close()
-
-	enc := gob.NewEncoder(bufio.NewWriter(f))
-	if err := enc.Encode(state.macros.GetCurrentMacroset()); err != nil {
-		state.out.Warn("couldn't write state file: %v\v", err)
-	}
-}
-
 func createPersistenceFile(userSupplied, defaultIfNone string) (*os.File, error) {
 	fullPath, err := getPersistencePath(userSupplied, defaultIfNone)
 	if err != nil {
@@ -211,23 +182,4 @@ func openPersistenceFile(userSupplied, defaultIfNone string) (*os.File, error) {
 		return nil, fmt.Errorf("couldn't open ~/.netkk/%s; persistence will be limited to this session: %v", filepath.Base(fullPath), err)
 	}
 	return f, nil
-}
-
-func getPersistencePath(userSupplied, defaultIfNone string) (string, error) {
-	var fullPath string
-	if userSupplied != "" {
-		fullPath = userSupplied
-	} else {
-		homedir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("couldn't get homedir; persistence will be limited to this session: %v", err)
-		}
-		appDir := filepath.Join(homedir, ".netkk")
-		err = os.Mkdir(appDir, os.ModeDir|0755)
-		if err != nil && !os.IsExist(err) {
-			return "", fmt.Errorf("couldn't create ~/.netkk; persistence will be limited to this session: %v", err)
-		}
-		fullPath = filepath.Join(appDir, defaultIfNone)
-	}
-	return fullPath, nil
 }
