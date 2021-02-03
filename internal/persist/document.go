@@ -27,6 +27,14 @@ type Document interface {
 	// in the context of a full-qualified alternative key. If false, it is
 	// a "normal" key.
 	UsesAlternativeKey() bool
+
+	// Encode takes a value and writes it to the document using the current
+	// Encoder.
+	Encode(i interface{}) error
+
+	// Decode reads a value from the document and unmarshals it. i must be a
+	// pointer to an underlying type that is supported by the codec.
+	Decode(i interface{}) error
 }
 
 // AllowedOperations is a number that specifies which operations
