@@ -2,6 +2,7 @@ package console
 
 import (
 	"bufio"
+	"dekarrin/netkarkat/internal/persist"
 	"encoding/gob"
 	"fmt"
 	"os"
@@ -19,6 +20,11 @@ type persistSource struct {
 }
 
 func (state *consoleState) loadPersistenceFiles() {
+	var err error
+	state.userStore, err = persist.NewUserHomeDirStore(".netkk", nil, nil)
+	if err != nil {
+
+	}
 	state.loadHistFile()
 	state.loadMacrosFile()
 	state.loadStateFile()

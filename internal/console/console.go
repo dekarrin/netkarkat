@@ -14,6 +14,7 @@ import (
 
 	"dekarrin/netkarkat/internal/driver"
 	"dekarrin/netkarkat/internal/macros"
+	"dekarrin/netkarkat/internal/persist"
 	"dekarrin/netkarkat/internal/verbosity"
 
 	"github.com/peterh/liner"
@@ -38,16 +39,16 @@ func init() {
 }
 
 type consoleState struct {
-	connection                driver.Connection
-	running                   bool         // only valid if in interactive mode
-	prompt                    *liner.State // only valid if in interactive mode
-	usingUserPersistenceFiles bool         // only valid if in interactive mode
-	version                   string
-	out                       verbosity.OutputWriter
-	interactive               bool
-	delimitWithSemicolon      bool
-	macrofile                 string
-	macros                    macros.MacroCollection
+	connection           driver.Connection
+	running              bool          // only valid if in interactive mode
+	prompt               *liner.State  // only valid if in interactive mode
+	userStore            persist.Store // only valid if in interactive mode
+	version              string
+	out                  verbosity.OutputWriter
+	interactive          bool
+	delimitWithSemicolon bool
+	macrofile            string
+	macros               macros.MacroCollection
 }
 
 func promptWithConnectionMonitor(state *consoleState, prefix string) (string, error) {

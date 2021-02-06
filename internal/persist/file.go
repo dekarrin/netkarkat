@@ -14,6 +14,8 @@ import (
 type fsSourceStore struct {
 	dir          string
 	newFilePerms os.FileMode
+	enc          func(i interface{}) error
+	dec          func(i interface{}) error
 }
 
 type fileDocument struct {
@@ -181,7 +183,7 @@ func NewFilesystemStore(directory string, dirPerm, newDocPerm *os.FileMode) (sto
 			return fsStore, nil
 		}
 		if !info.IsDir() {
-			return nil, fmt.Errorf("path exists and is not a directory", directory)
+			return nil, fmt.Errorf("path exists and is not a directory")
 		}
 	}
 	return store, nil
