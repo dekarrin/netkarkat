@@ -3,6 +3,7 @@ package persist
 import (
 	"encoding/gob"
 	"fmt"
+	"reflect"
 )
 
 // Codec is a type that knows how to encode and decode. Prepare() is called
@@ -11,7 +12,7 @@ import (
 // by the Codec. For Documents that are writable, Finalize() is called when the
 // Document is closed to finish the encoding process.
 //
-// The Zero-value of all Codec's are assumed to be usable.
+// The Zero-value of all Codecs are assumed to be usable.
 type Codec interface {
 	// Fromat returns the human-readable name of the format that the Codec works
 	// with.
@@ -72,6 +73,9 @@ type Codec interface {
 	// data, or encryption. After any such steps are complete, any resources
 	// that were set up for encoding or decoding to the document passed in to
 	// Prepare() are removed.
+	//
+	// After Finalize is called, subsequent calls prior to calling Prepare()
+	// will have no effect and will return a nil error.
 	Finalize() error
 }
 
@@ -95,7 +99,7 @@ func (gobber *GobCodec) Prepare(doc Document) error {
 }
 
 // Decode decodes data from the Document in GOB-format.
-func (gobber *GobCodec) Decode(v interface{}) (err error) {
+func (gobber *GobCodec) Decode(v interface{}) error {
 	if gobber.dec == nil {
 		return fmt.Errorf("no document to decode; call Prepare() first")
 	}
@@ -113,5 +117,21 @@ func (gobber *GobCodec) Encode(v interface{}) error {
 	if v == nil {
 		return fmt.Errorf("GOB format does not support encoding nil pointers")
 	}
-	return gobber.dec.Decode(v)
+	return gobber.enc.Encode(v)
+}
+
+// Discard skips the next data item in the Document in GOB-format.
+func (gobber *GobCodec) Discard() error {
+	if gobber.dec == nil {
+		return fmt.Errorf("no document to decode; call Prepare() first")
+	}
+
+	return gobber.dec.DecodeValue(reflect.Value{})
+}
+
+// Finalize disassociates from the Document passed in Prepare().
+func (gobber *GobCodec) Finalize() error {
+	gobber.dec = nil
+	gobber.enc = nil
+	return nil
 }
