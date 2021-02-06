@@ -203,7 +203,19 @@ func NewUserHomeDirStore(directory string, dirPerm, newDocPerm *os.FileMode) (St
 	return NewFilesystemStore(appDir, dirPerm, newDocPerm)
 }
 
-func (fsStore *fsSourceStore) OpenDocument(key, fqAltKey string, mode DocumentMode) (doc Document, err error) {
+func (fsStore *fsSourceStore) OpenDocument(key string, mode DocumentMode) (doc Document, err error) {
+	return fsStore.OpenDocumentAlt(key, "", mode)
+}
+
+func (fsStore *fsSourceStore) Open(key string) (doc Document, err error) {
+	return fsStore.OpenDocument(key, BasicOpenMode)
+}
+
+func (fsStore *fsSourceStore) Create(key string) (doc Document, err error) {
+	return fsStore.OpenDocument(key, BasicCreateMode)
+}
+
+func (fsStore *fsSourceStore) OpenDocumentAlt(key, fqAltKey string, mode DocumentMode) (doc Document, err error) {
 	fDoc := &fileDocument{
 		mode: mode,
 		key:  key,
@@ -230,12 +242,12 @@ func (fsStore *fsSourceStore) OpenDocument(key, fqAltKey string, mode DocumentMo
 	return fDoc, nil
 }
 
-func (fsStore *fsSourceStore) Open(key, fqAltKey string) (doc Document, err error) {
-	return fsStore.OpenDocument(key, fqAltKey, BasicOpenMode)
+func (fsStore *fsSourceStore) OpenAlt(key, fqAltKey string) (doc Document, err error) {
+	return fsStore.OpenDocumentAlt(key, fqAltKey, BasicOpenMode)
 }
 
-func (fsStore *fsSourceStore) Create(key, fqAltKey string) (doc Document, err error) {
-	return fsStore.OpenDocument(key, fqAltKey, BasicCreateMode)
+func (fsStore *fsSourceStore) CreateAlt(key, fqAltKey string) (doc Document, err error) {
+	return fsStore.OpenDocumentAlt(key, fqAltKey, BasicCreateMode)
 }
 
 func fileFlagsFromDocumentMode(mode DocumentMode) int {
