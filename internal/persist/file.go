@@ -14,8 +14,6 @@ import (
 type fsSourceStore struct {
 	dir          string
 	newFilePerms os.FileMode
-	enc          func(i interface{}) error
-	dec          func(i interface{}) error
 }
 
 type fileDocument struct {
@@ -28,6 +26,8 @@ type fileDocument struct {
 
 	readBuf  *bufio.Reader
 	writeBuf bytes.Buffer
+
+	codecs []Codec
 }
 
 // Read reads bytes from the file.

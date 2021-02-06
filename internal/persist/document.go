@@ -27,6 +27,13 @@ type Document interface {
 	// in the context of a full-qualified alternative key. If false, it is
 	// a "normal" key.
 	UsesAlternativeKey() bool
+
+	// UseCodec begins using the given codec in the Document. If any codecs are
+	// already being used, the new codec will be the new end of the codec
+	// pipeline.
+	//
+	// The Document itself is returned.
+	UseCodec(c Codec) Document
 }
 
 // AllowedOperations is a number that specifies which operations

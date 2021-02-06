@@ -79,6 +79,25 @@ type Codec interface {
 	Finalize() error
 }
 
+type codecUserMixin struct {
+	codecs []Codec
+}
+
+// UseCodec begins using the given codex for future calls to Encode, Decode, and
+// Discard.
+func (mix *codecUserMixin) UseCodec(c Codec) {
+	mix.codecs = append(fDoc.codecs, c)
+	return fDoc
+}
+
+// Encode encodes the given interface value using the current set of codecs.
+func (fDoc *fileDocument) Encode(i interface{}) error {
+	if len(fDoc.codecs) < 1 {
+		return fmt.Errorf("no codecs to encode with; call UseCodec() first")
+	}
+	return fDoc
+}
+
 // GobCodec is used to work with Gob-formated data in a Document. The zero value
 // is ready to use.
 type GobCodec struct {
